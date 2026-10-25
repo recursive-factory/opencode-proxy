@@ -145,9 +145,12 @@ Given a downstream OpenAI chat-completions request, `proxy.ts`:
    the legacy 13k OpenCode prepend (≈3.5k tokens/request). On a minimal-mode 429
    the proxy retries once with the full prompt and stays in full mode for 1h
    (gate-rotation self-heal); a genuine quota 429 fails the retry too. Verified
-   end-to-end through the proxy in Colab 2026-10-25 (Cline-style request:
-   200, 408 prompt tokens, `read_file` tool call renamed `read` upstream and
-   restored downstream).
+   end-to-end through the proxy in Colab 2026-10-25: Cline-style plain (200,
+   408 prompt tokens), `read_file` tool call renamed `read` upstream and
+   restored downstream, streaming, no-system client (stub alone, 57 chars,
+   311 tokens), deepseek (348 tokens), and a multi-turn tool-result
+   round-trip (416 tokens) — all on a fresh runtime/IP after an earlier
+   session's quota exhaustion blocked the first attempt at the last three.
 2. **Tools (client's own — the proxy defines no toolset):**
    - Client has a tool named `read` → unchanged.
    - Else, find the client's read-like tool (`/read|view|file|open|…/`, e.g. Cursor's
