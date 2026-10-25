@@ -24,7 +24,7 @@ To be accepted upstream, every request needs (measured, not guessed — see [AGE
 1. **Bun's HTTP transport** (the real client runs on Bun; Node fetch is rejected on identical bytes)
 2. A **versioned User-Agent** tracking the latest `@opencode/cli` release
 3. A **fresh session ID** per request, encoded the way OpenCode encodes them
-4. The **full OpenCode agent system prompt**, built per request (per-model block + live skill scan)
+4. A **gate stub in the system prompt**: an `<env>` block with a `Working directory:` line, appended to your client's own system prompt (measured 2026-10-25 — the full 13k OpenCode prompt also passes and remains as an automatic fallback, `PROXY_SYSTEM=full`)
 5. A tool literally named **`read`** — if your client calls it something else (e.g. Cursor's `view`), the proxy renames it upstream and renames the calls back, invisibly
 
 ---
@@ -136,7 +136,9 @@ Environment variables for the proxy:
 |---|---|
 | `PORT` / `HOST` | Listen address (default `8787` / `127.0.0.1`) |
 | `PROXY_API_KEY` | If set, clients must send `Authorization: Bearer <value>` |
-| `PROXY_DUMP=1` | Dump each request/response pair to `.proxy-dump.jsonl` (contains full prompts — delete after debugging) |
+| `PROXY_SYSTEM` | `minimal` (default: client system + ~60-char gate stub) or `full` (legacy 13k OpenCode prepend). Minimal mode auto-retries once with the full prompt on a 429 |
+| `PROXY_WORKDIR` | Working-directory path written into the gate stub (default: the proxy's cwd) |
+| `PROXY_DUMP=1` | Dump each request/response pair to `.proxy-dump.jsonl` (contains full prompts — delete after debugging). In Colab, use the panel's **🔍 Request inspector** section instead (Enable dump → send one request → Show breakdown → Turn off & clear); `PROXY_DUMP_FILE` overrides the dump path |
 | `OPENCODE_API_KEY` | Use instead of the anonymous `Bearer public` lane (paid/Go) |
 | `OPENCODE_BASE` | Upstream base (default `https://opencode.ai/inference`) |
 | `OPENCODE_UA` | Pin the User-Agent instead of tracking latest `@opencode/cli` |

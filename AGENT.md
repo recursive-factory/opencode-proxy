@@ -125,7 +125,7 @@ exactly one variable (Bun runtime, live upstream):
 | 1 | **Bun transport.** Request must be sent by Bun's fetch (the CLI's runtime). | Byte-identical captured request: Node fetch → 429, Bun fetch → 200. Even the real CLI **through mitmproxy** → 429 (MITM re-originates TLS). |
 | 2 | **Versioned User-Agent:** `opencode/latest/<version>/cli`, version = latest `@opencode/cli` from npm (2.1.4 on 2026-10-25), resolved dynamically and cached 24 h in `.opencode-ids.json`. | `opencode/latest/1.3.15/cli` → `426` ("OpenCode 1.18.0 or newer is required"); bare/other UAs rejected in earlier community tests. |
 | 3 | **Descending session ID:** `x-opencode-session` (+ `-id`, `x-session-affinity`, `x-session-id`, same value) formatted `ses_<12 hex><14 base62>`, where hex = `~(Date.now() * 0x1000 + counter)` truncated to 48 bits — OpenCode's `Identifier.create("ses","descending")` (`packages/opencode/src/id/id.ts`). The server *decodes* the inverted timestamp. **Fresh ID per upstream request** (the CLI makes one session per run). | Ascending-timestamp `ses_` → 429; UUID → 429; correctly-encoded fresh ID → 200. |
-| 4 | **The full OpenCode agent system prompt must be present.** Built per request by `buildSystemPrompt()` (dynamic model/skills/date/env over the captured template). Skills are scanned live: every `*/SKILL.md` in `.opencode/skills`, `~/.config/opencode/skills`, `~/.agents/skills`, `~/.claude/skills` whose frontmatter lacks `disable-model-invocation: true`, plus CLI built-ins `opencode`/`report` — this reproduced the captured 14 exactly, and the generated prompt for `big-pickle` is byte-identical to the capture. Descriptions may be YAML folded (`>-`) — the parser handles that; mangled descriptions broke the gate during development. | Client system alone → 429; generic 13k-char system → 429; OpenCode prompt truncated to 8,000 chars → 429; full prompt (+ client prompt appended) → 200. Something late in the prompt (tool catalog region) is checked; we did not isolate the exact substring. |
+| 4 | **An `<env>` block containing a `Working directory:` line must be in the system prompt** (isolated 2026-10-25, correcting the earlier "full prompt" belief). Method: custom-agent captures (`.opencode/agents/proxyprobe.md` — the agent `system` replaces only the 1,472-char head; the 11.7k model/tool-catalog/skills/env suffix is still appended by the harness) replayed and ablated on a fresh Colab IP: head, tool catalog and skills are NOT gated; client system + `<env>` stub alone (248 chars) → 200 on big-pickle (incl. a real tool call), deepseek-v4.1-flash-free and glm-5.3-flash-free. The env *value* is not validated (fake `/x` passed); bare `Working directory:` without `<env>` tags → 429; empty `<env>` → 429. The full prompt (built by `buildSystemPrompt()`, dynamic model/skills/date/env over the captured template) also passes and is kept as the `PROXY_SYSTEM=full` fallback. Earlier evidence is consistent: truncation to 8,000 chars cut off the trailing `<env>` block. | Client system alone → 429; generic 13k-char system → 429; full prompt → 200; client + env stub → 200 (Colab, 2026-10-25). |
 | 5 | **A tool literally named `read` must be in `tools`.** | No tools → 429; `edit` alone → 429; `bash` alone → 429; 12 fake names → 429; **any** `read` (exact CLI def, minimal stub, or a renamed client tool) → 200. Triggered a real bug: Cursor's reader is named `view`, so VS Code/Cursor requests failed until the proxy renamed it (see §5). |
 | 6 | Body: `stream: true`, `stream_options.include_usage`, `max_completion_tokens` (CLI sends 32000). | `stream:false` failed in early (zen-era) tests; on `/inference` it was masked by other gates. We always stream upstream and assemble JSON for non-streaming clients. |
 
@@ -138,9 +138,16 @@ and the `Authorization` header's presence (in some tests).
 
 Given a downstream OpenAI chat-completions request, `proxy.ts`:
 
-1. **System:** prepends the captured OpenCode system prompt in front of the client's
-   system prompt (client instructions come after; models still follow them).
-   Cost ≈3.5k prompt tokens/request, mostly prompt-cached upstream.
+1. **System:** downstream clients (Cline / VS Code) are the agent — their system
+   prompt is the only persona. Default (`PROXY_SYSTEM=minimal`): client system +
+   a ~60-char `<env>` gate stub (`buildMinimalSystem()` in `fingerprint.ts`;
+   workdir from `PROXY_WORKDIR` or the proxy's cwd). `PROXY_SYSTEM=full` restores
+   the legacy 13k OpenCode prepend (≈3.5k tokens/request). On a minimal-mode 429
+   the proxy retries once with the full prompt and stays in full mode for 1h
+   (gate-rotation self-heal); a genuine quota 429 fails the retry too. Verified
+   end-to-end through the proxy in Colab 2026-10-25 (Cline-style request:
+   200, 408 prompt tokens, `read_file` tool call renamed `read` upstream and
+   restored downstream).
 2. **Tools (client's own — the proxy defines no toolset):**
    - Client has a tool named `read` → unchanged.
    - Else, find the client's read-like tool (`/read|view|file|open|…/`, e.g. Cursor's
