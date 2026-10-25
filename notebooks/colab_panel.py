@@ -24,7 +24,8 @@ FILES = ['src/fingerprint.ts', 'src/hit-model.ts', 'src/proxy.ts',
 MODELS = ['big-pickle', 'beam-free', 'deepseek-v4.1-flash-free', 'flint-40b-free',
           'glm-5.3-flash-free', 'mimo-v2.6-flash-free', 'nemotron-3.5-lightning-free',
           'nemotron-3.5-super-vl-free']
-STATE = {'proxy': None, 'tunnel': None, 'url': None}
+STATE = {'proxy': None, 'tunnel': None, 'url': None, 'dump': False}
+DUMP_FILE = ROOT + '/.proxy-dump.jsonl'
 QUOTA_HINT = ('If you see "429" or "quota", this session\'s free allowance is used up. '
               'Fix: menu Runtime → Restart session, then run the panel cell again.')
 
@@ -106,11 +107,19 @@ def healthy():
         return False
 
 
+def proxy_env(dump=None):
+    e = env()
+    if STATE.get('dump') if dump is None else dump:
+        e['PROXY_DUMP'] = '1'
+        e['PROXY_DUMP_FILE'] = DUMP_FILE
+    return e
+
+
 def ensure_proxy():
     if healthy():
         return True
     say('⏳ Starting the proxy…')
-    STATE['proxy'] = subprocess.Popen(['bun', 'run', 'proxy.ts'], cwd=ROOT, env=env(),
+    STATE['proxy'] = subprocess.Popen(['bun', 'run', 'proxy.ts'], cwd=ROOT, env=proxy_env(),
                                       stdout=open('/tmp/proxy.log', 'w'),
                                       stderr=subprocess.STDOUT)
     for _ in range(60):
@@ -121,6 +130,122 @@ def ensure_proxy():
     say('❌ The proxy did not start. What to do: run Step 1 (Setup) once, then try again. '
         'If it keeps failing, restart the session (Runtime → Restart session).')
     return False
+
+
+# ------------------------------------------------------- request inspector
+def restart_proxy(dump):
+    """Restart ONLY the proxy (the tunnel keeps pointing at 127.0.0.1:8787,
+    so a zrok/Cloudflare address stays the same)."""
+    p = STATE.get('proxy')
+    if p:
+        p.terminate()
+        STATE['proxy'] = None
+    for _ in range(15):
+        if not healthy():
+            break
+        time.sleep(1)
+    if healthy():  # started outside the panel (e.g. by Run tests) — stop it too
+        sh(['pkill', '-f', 'proxy.ts'])
+        for _ in range(15):
+            if not healthy():
+                break
+            time.sleep(1)
+    STATE['dump'] = dump
+    STATE['proxy'] = subprocess.Popen(['bun', 'run', 'proxy.ts'], cwd=ROOT,
+                                      env=proxy_env(dump),
+                                      stdout=open('/tmp/proxy.log', 'w'),
+                                      stderr=subprocess.STDOUT)
+    for _ in range(60):
+        if healthy():
+            return True
+        time.sleep(1)
+    return False
+
+
+def do_dump_on(_=None):
+    say('⏳ Turning the request recorder ON and restarting the proxy '
+        '(your public address does not change)…')
+    if not os.path.exists(ROOT):
+        say('❌ What to do: run Step 1 (Setup) first.')
+        return
+    if restart_proxy(dump=True):
+        say('✅ Recording ON → ' + DUMP_FILE)
+        say('⚠️ The dump contains FULL prompts and file contents. Reproduce ONE '
+            'slow/big request from your app now, then click "Show breakdown" and '
+            '"Turn off & clear dump".')
+        set_status('recording requests — reproduce one request, then Show breakdown.')
+    else:
+        say('❌ The proxy did not restart. What to do: run Step 1, then try again.')
+
+
+def _text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return ''.join(p.get('text', '') for p in content if isinstance(p, dict))
+    return ''
+
+
+def do_breakdown(_=None):
+    path = DUMP_FILE if os.path.exists(DUMP_FILE) else ROOT + '/src/.proxy-dump.jsonl'
+    if not os.path.exists(path):
+        say('❌ No dump yet. What to do: click "Enable dump & restart proxy", '
+            'send ONE request from your app, then click this again.')
+        return
+    say('— Request breakdown (approx tokens = chars ÷ 4; the dump itself is at '
+        + path + ') —')
+    for i, line in enumerate(open(path), 1):
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        client, up = rec.get('client', {}), rec.get('upstreamBody', {})
+        cmsgs = client.get('messages') or []
+        umsgs = up.get('messages') or []
+        c_sys = sum(len(_text(m.get('content'))) for m in cmsgs if m.get('role') == 'system')
+        u_sys = len(_text(umsgs[0].get('content'))) if umsgs else 0
+        other = sum(len(_text(m.get('content'))) for m in umsgs[1:])
+        tools = up.get('tools') or []
+        sized = sorted(((len(json.dumps(t)), (t.get('function') or {}).get('name')
+                         or t.get('name') or '?') for t in tools), reverse=True)
+        t_chars = sum(s for s, _ in sized)
+        total = u_sys + other + t_chars
+        say(f'Request {i}: model={up.get("model")}  ≈{total // 4:,} prompt tokens total')
+        say(f'  • our gate stub        : {max(0, u_sys - c_sys):>8,} chars  ≈{max(0, u_sys - c_sys) // 4:,} tok')
+        say(f'  • your app system text : {c_sys:>8,} chars  ≈{c_sys // 4:,} tok')
+        say(f'  • messages / history   : {other:>8,} chars  ≈{other // 4:,} tok  ({len(umsgs)} msgs)')
+        say(f'  • tool definitions     : {t_chars:>8,} chars  ≈{t_chars // 4:,} tok  ({len(tools)} tools)')
+        if sized:
+            say('    biggest tools: ' + ', '.join(f'{n}≈{s // 4:,}' for s, n in sized[:10]))
+    say('How to fix: the biggest slice is the lever. Tools ≫ history ≫ your app '
+        'system text ≫ our gate stub (~60 chars, gate-required — the old 13k '
+        'OpenCode prepend is gone since 2026-10-25). Trim tools by disabling '
+        'unused MCP servers / switching the app to a no-tools Ask mode for '
+        'plain questions; trim history by starting a new chat.')
+
+
+def do_download_dump(_=None):
+    if not os.path.exists(DUMP_FILE):
+        say('❌ No dump to download yet — enable the dump and send one request first.')
+        return
+    try:
+        from google.colab import files
+        files.download(DUMP_FILE)
+        say('⬇️ Downloading ' + DUMP_FILE + ' — it contains full prompts; keep it private and delete it after use.')
+    except Exception as e:
+        say('❌ Download failed (' + str(e) + '). The file is at ' + DUMP_FILE +
+            ' in this runtime (left sidebar → Files).')
+
+
+def do_dump_off(_=None):
+    say('⏳ Turning the recorder OFF, deleting the dump, and restarting the proxy…')
+    if os.path.exists(DUMP_FILE):
+        os.remove(DUMP_FILE)
+    if restart_proxy(dump=False):
+        say('✅ Recording OFF, dump deleted. Your public address is unchanged.')
+        set_status('recording off.')
+    else:
+        say('❌ The proxy did not restart. What to do: press "3 · Start public address".')
 
 
 # ------------------------------------------------------------------- actions
@@ -378,6 +503,13 @@ stop_btn = widgets.Button(description='Stop everything', button_style='danger',
                           layout=widgets.Layout(width='180px'))
 ask_btn = widgets.Button(description='Ask', button_style='primary',
                          layout=widgets.Layout(width='120px'))
+dump_on_btn = widgets.Button(description='Enable dump & restart proxy', button_style='warning',
+                             layout=widgets.Layout(width='240px'))
+breakdown_btn = widgets.Button(description='Show breakdown', button_style='info',
+                               layout=widgets.Layout(width='180px'))
+download_btn = widgets.Button(description='Download dump', layout=widgets.Layout(width='160px'))
+dump_off_btn = widgets.Button(description='Turn off & clear dump', button_style='danger',
+                              layout=widgets.Layout(width='200px'))
 all_btn = widgets.Button(description='🚀 One-click: do everything for me',
                          button_style='success',
                          layout=widgets.Layout(width='100%', height='48px'))
@@ -387,6 +519,10 @@ test_btn.on_click(do_tests)
 start_btn.on_click(do_start)
 stop_btn.on_click(do_stop)
 ask_btn.on_click(do_ask)
+dump_on_btn.on_click(do_dump_on)
+breakdown_btn.on_click(do_breakdown)
+download_btn.on_click(do_download_dump)
+dump_off_btn.on_click(do_dump_off)
 
 zrok_fields = widgets.VBox([name_label, token_pw])
 
@@ -426,6 +562,13 @@ panel = widgets.VBox([
     section('💬 Try the models', [
         widgets.HBox([model_dd, prompt_text, ask_btn]),
         widgets.Label('A quick chat, right here in the notebook. Works once the proxy is running.')]),
+    section('🔍 Request inspector — why is a simple question using so many tokens?', [
+        widgets.HBox([dump_on_btn, breakdown_btn]),
+        widgets.HBox([download_btn, dump_off_btn]),
+        widgets.Label('1) Enable the dump  2) Send ONE request from your app  '
+                      '3) Show breakdown  4) Turn off & clear. '
+                      'Restarting the proxy does not change your public address. '
+                      '⚠️ The dump contains full prompts — do not share it.')]),
     section('📜 Log', [out]),
 ])
 display(panel)
