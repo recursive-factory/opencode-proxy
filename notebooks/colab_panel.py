@@ -19,7 +19,7 @@ from IPython.display import HTML, clear_output, display
 ROOT = '/content/opencode-proxy'
 BASE = 'http://127.0.0.1:8787'
 REPO_API = 'https://api.github.com/repos/recursive-factory/opencode-proxy/contents/'
-FILES = ['src/fingerprint.ts', 'src/hit-model.ts', 'src/proxy.ts',
+FILES = ['src/fingerprint.ts', 'src/hit-model.ts', 'src/proxy.ts', 'src/langfuse.ts',
          'src/minimize-system.ts', 'data/opencode-system.txt', 'package.json']
 MODELS = ['big-pickle', 'beam-free', 'deepseek-v4.1-flash-free', 'flint-40b-free',
           'glm-5.3-flash-free', 'mimo-v2.6-flash-free', 'nemotron-3.5-lightning-free',
@@ -112,6 +112,19 @@ def proxy_env(dump=None):
     if STATE.get('dump') if dump is None else dump:
         e['PROXY_DUMP'] = '1'
         e['PROXY_DUMP_FILE'] = DUMP_FILE
+    # Optional Langfuse tracing: keys come from Colab Secrets, never from code.
+    try:
+        from google.colab import userdata
+        for k in ('LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_BASE_URL',
+                  'LANGFUSE_CAPTURE_CONTENT', 'LANGFUSE_ENVIRONMENT'):
+            try:
+                v = (userdata.get(k) or '').strip()
+            except Exception:
+                v = ''
+            if v:
+                e[k] = v
+    except Exception:
+        pass
     return e
 
 
