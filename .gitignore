@@ -1,5 +1,1 @@
-tmp/
-.opencode-ids.json
-.proxy-dump.jsonl
 node_modules/
-copilot_all_prompts_*.json
