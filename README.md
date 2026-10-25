@@ -138,9 +138,6 @@ Environment variables for the proxy:
 | `PROXY_API_KEY` | If set, clients must send `Authorization: Bearer <value>` |
 | `PROXY_SYSTEM` | `minimal` (default: client system + ~60-char gate stub) or `full` (legacy 13k OpenCode prepend). Minimal mode auto-retries once with the full prompt on a 429 |
 | `PROXY_WORKDIR` | Working-directory path written into the gate stub (default: the proxy's cwd) |
-| `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` | Enable Langfuse tracing via OpenTelemetry — every request becomes a trace (root span + generation) grouped by conversation session, with token usage and explicit $0 cost for the free models. No keys = tracing off |
-| `LANGFUSE_BASE_URL` | Langfuse host (default `https://cloud.langfuse.com`; US: `https://us.cloud.langfuse.com`, or your self-hosted URL). In Colab, set the keys as Secrets and the panel forwards them |
-| `LANGFUSE_CAPTURE_CONTENT` | `1` to also send prompt/completion text (truncated at 32k chars). Off by default — prompts can contain file contents; metadata (model, tokens, tool names, latency, status) is always sent when tracing is on |
 | `PROXY_DUMP=1` | Dump each request/response pair to `.proxy-dump.jsonl` (contains full prompts — delete after debugging). In Colab, use the panel's **🔍 Request inspector** section instead (Enable dump → send one request → Show breakdown → Turn off & clear); `PROXY_DUMP_FILE` overrides the dump path |
 | `OPENCODE_API_KEY` | Use instead of the anonymous `Bearer public` lane (paid/Go) |
 | `OPENCODE_BASE` | Upstream base (default `https://opencode.ai/inference`) |
@@ -151,7 +148,6 @@ Environment variables for the proxy:
 ```
 src/fingerprint.ts       The upstream "client fingerprint" (UA, session IDs, system prompt) — shared by everything
 src/proxy.ts             The OpenAI-compatible proxy server
-src/langfuse.ts          Optional Langfuse tracing via OpenTelemetry (OTLP/HTTP, no dependencies)
 src/hit-model.ts         Terminal CLI for one-shot model calls and roster/probes
 src/minimize-system.ts   Finds the smallest system prompt that still passes upstream
 data/opencode-system.txt Captured OpenCode system-prompt template (dynamic parts filled per request)

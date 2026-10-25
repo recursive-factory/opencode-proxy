@@ -32,8 +32,6 @@
  */
 import { appendFile } from "node:fs/promises";
 import { BASE, FALLBACK_FREE, SYSTEM_TEMPLATE, buildMinimalSystem, buildSystemPrompt, isFree, upstreamHeaders } from "./fingerprint.ts";
-import { deriveSessionId, langfuseEnabled, sendTrace } from "./langfuse.ts";
-
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "127.0.0.1";
 const PROXY_KEY = process.env.PROXY_API_KEY || "";
@@ -116,24 +114,8 @@ async function handleChat(req: Request): Promise<Response> {
   try { client = (await req.json()) as AnyObj; } catch { return json(errBody("invalid JSON body"), 400); }
   let sysMode = effectiveSystemMode();
   let { model, body, renameBack, suppress } = await transformRequest(client, sysMode);
-  // Langfuse telemetry (no-op unless LANGFUSE_* keys are set). emit() is
-  // idempotent and fire-and-forget — it never blocks the client response.
-  const telSession = deriveSessionId(client, req.headers);
-  const telUser = req.headers.get("x-langfuse-user-id") || (typeof client.user === "string" ? client.user : undefined);
-  let telEmitted = false, telFallback = false, telFirstByte: number | undefined;
-  const emit = (status: number, opts: { error?: string; outputText?: string; toolCalls?: string[]; usage?: any } = {}) => {
-    if (telEmitted || !langfuseEnabled()) return;
-    telEmitted = true;
-    sendTrace({
-      model, startedMs: started, endedMs: Date.now(), completionStartMs: telFirstByte,
-      status, error: opts.error, sysMode, systemChars: textOf(body.messages?.[0]?.content).length,
-      messages: body.messages || [], tools: (body.tools || []).map(toolName),
-      outputText: opts.outputText || "", toolCalls: opts.toolCalls || [], usage: opts.usage ?? null,
-      fallbackRetried: telFallback, clientStream: !!client.stream, sessionId: telSession, userId: telUser,
-    });
-  };
-  if (!isFree(model)) { emit(400, { error: `model '${model}' is not a free model` }); return json(errBody(`model '${model}' is not a free model`, "invalid_request_error", { code: "model_not_free" }), 400); }
-  if (model === "jev-1.13-free") { emit(400, { error: "jev-1.13-free uses an unsupported endpoint" }); return json(errBody("jev-1.13-free uses an unsupported endpoint"), 400); }
+  if (!isFree(model)) return json(errBody(`model '${model}' is not a free model`, "invalid_request_error", { code: "model_not_free" }), 400);
+  if (model === "jev-1.13-free") return json(errBody("jev-1.13-free uses an unsupported endpoint"), 400);
 
   const attempt = async (b: AnyObj) => fetch(`${BASE}/openai/v1/chat/completions`, {
     method: "POST", headers: await upstreamHeaders(), body: JSON.stringify(b), signal: AbortSignal.timeout(300_000),
@@ -145,7 +127,6 @@ async function handleChat(req: Request): Promise<Response> {
   if (upstream && upstream.status === 429 && sysMode === "minimal") {
     await upstream.text().catch(() => {});
     console.log(`↺ ${model} minimal-mode 429 — retrying with full system prompt`);
-    telFallback = true;
     sysMode = "full"; fullModeUntil = Date.now() + 3_600_000;
     ({ model, body, renameBack, suppress } = await transformRequest(client, "full"));
     upstream = await attempt(body);
@@ -163,44 +144,34 @@ async function handleChat(req: Request): Promise<Response> {
     const rec = JSON.stringify({ ts: new Date().toISOString(), sysMode, client, upstreamBody: body }) + "\n";
     await appendFile(dumpFile, rec).catch(() => {});
   }
-  if (!upstream) { emit(502, { error: "upstream unreachable" }); return json(errBody("upstream unreachable", "upstream_error"), 502); }
+  if (!upstream) return json(errBody("upstream unreachable", "upstream_error"), 502);
   if (!upstream.ok || !upstream.body) {
     console.log(`✗ ${model} -> upstream ${upstream.status} (${Date.now() - started}ms)`);
-    const errText = await upstream.text();
-    emit(upstream.status, { error: errText.slice(0, 500) });
-    return new Response(errText, { status: upstream.status, headers: { "Content-Type": "application/json" } });
+    return new Response(await upstream.text(), { status: upstream.status, headers: { "Content-Type": "application/json" } });
   }
-  telFirstByte = Date.now();
   console.log(`✓ ${model} client-stream=${!!client.stream} tools=${(body.tools || []).length} (${Date.now() - started}ms to first byte)`);
 
   if (client.stream) {
     const reader = upstream.body.getReader(), decoder = new TextDecoder(), encoder = new TextEncoder();
     let buf = "";
-    // Telemetry accumulators (parsed from the same chunks we pass through).
-    let sContent = "", sUsage: any = null; const sTools: string[] = [];
     const fixLine = (line: string): string => {
       const s = line.trim();
       if (!s.startsWith("data:") || s === "data: [DONE]") return line + "\n";
       try {
         const ev = JSON.parse(s.slice(5));
-        if (ev.usage) sUsage = ev.usage;
-        for (const ch of ev.choices || []) if (ch.delta) {
-          if (typeof ch.delta.content === "string") sContent += ch.delta.content;
-          ch.delta.tool_calls = fixToolCalls(ch.delta.tool_calls, renameBack, suppress);
-          for (const tc of ch.delta.tool_calls || []) { const n = tc?.function?.name; if (n && !sTools.includes(n)) sTools.push(n); }
-        }
+        for (const ch of ev.choices || []) if (ch.delta) ch.delta.tool_calls = fixToolCalls(ch.delta.tool_calls, renameBack, suppress);
         return `data: ${JSON.stringify(ev)}\n`;
       } catch { return line + "\n"; }
     };
     const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
         const { done, value } = await reader.read();
-        if (done) { if (buf.trim()) controller.enqueue(encoder.encode(fixLine(buf))); controller.close(); emit(200, { outputText: sContent, toolCalls: sTools, usage: sUsage }); return; }
+        if (done) { if (buf.trim()) controller.enqueue(encoder.encode(fixLine(buf))); controller.close(); return; }
         buf += decoder.decode(value, { stream: true });
         const lines = buf.split("\n"); buf = lines.pop() ?? "";
         for (const line of lines) controller.enqueue(encoder.encode(fixLine(line)));
       },
-      cancel() { emit(499, { error: "client cancelled stream", outputText: sContent, toolCalls: sTools, usage: sUsage }); reader.cancel().catch(() => {}); },
+      cancel() { reader.cancel().catch(() => {}); },
     });
     return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" } });
   }
@@ -227,7 +198,6 @@ async function handleChat(req: Request): Promise<Response> {
     }
   }
   const toolCalls = fixToolCalls([...calls.values()], renameBack, suppress);
-  emit(200, { outputText: content, toolCalls: toolCalls.map((tc: any) => tc?.function?.name || tc?.name).filter(Boolean), usage });
   return json({
     id, object: "chat.completion", created, model,
     choices: [{ index: 0, finish_reason: toolCalls.length ? "tool_calls" : finish, message: { role: "assistant", content: content || null, ...(reasoning && { reasoning_content: reasoning }), ...(toolCalls.length && { tool_calls: toolCalls }) } }],
