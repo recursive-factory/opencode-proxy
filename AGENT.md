@@ -255,7 +255,10 @@ exhaustion, not a fingerprint break — the dynamic prompt works as built. The
 notebook's tests were later consolidated into a single suite cell, and prompt
 minimization is an optional note there — intentionally not run (burns ~11 calls).
 The zrok share name is read from the Colab secret `ZROK_NAME` (default
-`oc-llm-proxy`).
+`oc-llm-proxy`). The notebook UI is now an ipywidgets control panel for
+non-coders (`notebooks/colab_panel.py`, exec'd by a one-line loader cell):
+Setup / Run tests / Start public URL / Stop buttons plus a try-it chat box;
+all step-by-step cells were removed.
 The notebook also exposes the Colab proxy two ways: a Cloudflare quick tunnel
 (random `*.trycloudflare.com` URL per start, no key) and zrok v2 (`zrok2`, token
 from the Colab `ZROK_TOKEN` secret) with the reserved fixed name
