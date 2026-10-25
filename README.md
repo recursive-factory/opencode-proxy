@@ -4,7 +4,7 @@ Use OpenCode's **free** AI models from tools that normally can't reach them — 
 
 OpenCode's free tier is officially limited to OpenCode's own client. This project runs a small local proxy (Bun + TypeScript) that speaks to the free models the way the real OpenCode client does, and re-serves them as a standard OpenAI Chat Completions API. Your tools keep their own prompts and tools; the proxy handles the rest.
 
-> ⚠️ **This is a personal interoperability workaround, and it can break without notice.** OpenCode intends the free tier for its own client only (upstream returns a generic `429 FreeUsageLimitError` to everyone else). Prefer paid/Go models for anything serious. The full reverse-engineering notes live in [AGENT.md](AGENT.md).
+> ⚠️ **This is just an experiment** — a personal interoperability and learning project, not a product. OpenCode intends the free tier for its own client only (upstream returns a generic `429 FreeUsageLimitError` to everyone else), so this workaround may stop working at any time and may not align with OpenCode's terms. Prefer the supported paid/Go models for anything serious. See [Disclaimer](#disclaimer) and the full reverse-engineering notes in [AGENT.md](AGENT.md).
 
 ---
 
@@ -166,3 +166,12 @@ AGENT.md                 Everything we reverse-engineered, and the playbook for 
 ## When it breaks
 
 It will, eventually — upstream rotates the gate. Start with [AGENT.md](AGENT.md): §4 is the measured gate contract, §6 explains how the captures were made (and how to redo them), §7 is the step-by-step recovery playbook.
+
+## Disclaimer
+
+This repository is an **experiment** shared for research, learning, and personal interoperability testing only.
+
+- It is **not affiliated with, endorsed by, or supported by** Anomaly Innovations, OpenCode, zrok, or Cloudflare. All product names belong to their respective owners.
+- OpenCode's free models are offered for use through OpenCode's own client. Accessing them through other clients may conflict with OpenCode's terms of service — **you are responsible for how you use this code**, and for complying with the terms of any service you connect to it.
+- There is no guarantee this works today or tomorrow: the upstream behaviour it relies on is undocumented and can change or be blocked at any time.
+- Provided **as-is, without warranty of any kind**. Don't use it for production, commercial, or redistributed offerings — if you need these models seriously, use OpenCode's supported paid options.
