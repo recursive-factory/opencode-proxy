@@ -92,7 +92,7 @@ Free quota is **per IP address** — when your home IP is used up, run the same 
 The notebook is a button-driven control panel for non-coders:
 
 1. Run the panel cell (▶)
-2. Click **1 · Setup** → **2 · Run tests** → **3 · Start public address**
+2. Press the big **🚀 One-click: do everything for me** button — it runs setup, the tests, and startup in order (or click **1 · Setup** → **2 · Run tests** → **3 · Start public address** one by one)
 3. Copy the address from the green box into your app (API key: `not-needed`)
 
 Two tunnel choices in Step 3:

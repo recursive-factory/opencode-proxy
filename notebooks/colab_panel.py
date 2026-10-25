@@ -140,6 +140,7 @@ def do_setup(_=None):
             say('   • ' + os.path.basename(f))
         say('✅ Setup complete. Next: click "2 · Run tests".')
         set_status('Step 1 done — next: Step 2 (Run tests).')
+        return True
     except Exception as e:
         say('❌ Setup failed: ' + str(e))
         say('What to do: check the internet connection and click Setup again. If the '
@@ -147,18 +148,23 @@ def do_setup(_=None):
             'OC_PROXY_GITHUB_REPO_TOKEN secret (a read-only GitHub token for this '
             'repo) — see "Help & notes" below.')
         set_status('Step 1 failed — see the Log at the bottom for what to do.')
+        return False
 
 
 def do_tests(_=None):
     try:
         set_status('⏳ Step 2 running (this uses a tiny bit of the free allowance)…')
         say('— Test 1 of 4: listing the free models (this one costs nothing) —')
-        bun(['bun', 'run', 'hit-model.ts', '--list'])
+        if bun(['bun', 'run', 'hit-model.ts', '--list']).returncode != 0:
+            raise RuntimeError('the model list could not be loaded')
         say('— Test 2 of 4: asking big-pickle a question —')
-        bun(['bun', 'run', 'hit-model.ts', 'big-pickle', 'Say hi in exactly five words.'])
+        if bun(['bun', 'run', 'hit-model.ts', 'big-pickle',
+                'Say hi in exactly five words.']).returncode != 0:
+            raise RuntimeError('big-pickle did not answer')
         say('— Test 3 of 4: asking a different model (deepseek) —')
-        bun(['bun', 'run', 'hit-model.ts', 'deepseek-v4.1-flash-free',
-             'Say hi in exactly five words.'])
+        if bun(['bun', 'run', 'hit-model.ts', 'deepseek-v4.1-flash-free',
+                'Say hi in exactly five words.']).returncode != 0:
+            raise RuntimeError('deepseek did not answer')
         say('— Test 4 of 4: checking the proxy itself —')
         started_here = False
         proc = None
@@ -187,10 +193,12 @@ def do_tests(_=None):
             proc.terminate()
         say('✅ All 4 tests passed. Next: Step 3 — start your public address.')
         set_status('Step 2 done, all tests passed — next: Step 3 (Start public address).')
+        return True
     except Exception as e:
         say('❌ A test failed: ' + str(e))
         say('What to do: ' + QUOTA_HINT)
         set_status('Step 2 failed — see the Log at the bottom for what to do.')
+        return False
 
 
 def ensure_zrok():
@@ -298,19 +306,33 @@ def do_start(_=None):
         set_status('⏳ Step 3 running…')
         if not ensure_proxy():
             set_status('Step 3 stopped — the proxy would not start. See the Log.')
-            return
+            return False
         url = start_zrok() if tunnel_choice.value == 'zrok' else start_cloudflare()
         if not url:
             set_status('Step 3 did not finish — see the Log at the bottom for what to do.')
-            return
+            return False
         STATE['url'] = url
         show_result(url)
         say('✅ Your public address is live: ' + url)
         set_status('✅ Live! Your address is in the green box in Step 3.')
+        return True
     except Exception as e:
         say('❌ Start failed: ' + str(e))
         say('What to do: press Start again. ' + QUOTA_HINT)
         set_status('Step 3 failed — see the Log at the bottom for what to do.')
+        return False
+
+
+def do_all(_=None):
+    say('🚀 One-click: doing everything — setup, tests, then start.')
+    if not do_setup():
+        say('⏹ One-click stopped: Step 1 (Setup) did not finish. Fix that first (see above).')
+        return
+    if not do_tests():
+        say('⏹ One-click stopped: a test failed, so the address was not started. See above.')
+        return
+    if do_start():
+        say('🚀 One-click complete — your public address is in the green box in Step 3.')
 
 
 def do_stop(_=None):
@@ -356,6 +378,10 @@ stop_btn = widgets.Button(description='Stop everything', button_style='danger',
                           layout=widgets.Layout(width='180px'))
 ask_btn = widgets.Button(description='Ask', button_style='primary',
                          layout=widgets.Layout(width='120px'))
+all_btn = widgets.Button(description='🚀 One-click: do everything for me',
+                         button_style='success',
+                         layout=widgets.Layout(width='100%', height='48px'))
+all_btn.on_click(do_all)
 setup_btn.on_click(do_setup)
 test_btn.on_click(do_tests)
 start_btn.on_click(do_start)
@@ -381,7 +407,9 @@ def section(title, children):
 
 
 panel = widgets.VBox([
-    widgets.HTML('<h3 style="margin:4px 0">🎛️ Control panel — do the steps in order: 1 → 2 → 3</h3>'),
+    widgets.HTML('<h3 style="margin:4px 0">🎛️ Control panel</h3>'),
+    all_btn,
+    widgets.Label('…or work through the steps one by one below:'),
     section('Step 1 · Get ready', [
         setup_btn,
         widgets.Label('One-time: installs the tools and downloads the project (about 30 seconds).')]),
