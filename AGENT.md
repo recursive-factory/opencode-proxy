@@ -259,7 +259,11 @@ built-in default; Start stops with instructions if it is unset (the
 `oc-llm-proxy` name in the 2026-10-25 results below was the then-default). The notebook UI is now an ipywidgets control panel for
 non-coders (`notebooks/colab_panel.py`, exec'd by a one-line loader cell):
 Setup / Run tests / Start public URL / Stop buttons plus a try-it chat box;
-all step-by-step cells were removed.
+all step-by-step cells were removed. All code fetches (loader + panel Setup)
+go through the GitHub contents API and send `Authorization: Bearer
+<GITHUB_TOKEN>` when that Colab secret exists, so the notebook keeps working
+if the repo is made private (fine-grained PAT, this repo only, Contents
+read-only).
 The notebook also exposes the Colab proxy two ways: a Cloudflare quick tunnel
 (random `*.trycloudflare.com` URL per start, no key) and zrok v2 (`zrok2`, token
 from the Colab `ZROK_TOKEN` secret) with the reserved fixed name

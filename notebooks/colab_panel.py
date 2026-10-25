@@ -18,7 +18,7 @@ from IPython.display import HTML, clear_output, display
 
 ROOT = '/content/opencode-proxy'
 BASE = 'http://127.0.0.1:8787'
-RAW = 'https://raw.githubusercontent.com/recursive-factory/opencode-proxy/main/'
+REPO_API = 'https://api.github.com/repos/recursive-factory/opencode-proxy/contents/'
 FILES = ['src/fingerprint.ts', 'src/hit-model.ts', 'src/proxy.ts',
          'src/minimize-system.ts', 'data/opencode-system.txt', 'package.json']
 MODELS = ['big-pickle', 'beam-free', 'deepseek-v4.1-flash-free', 'flint-40b-free',
@@ -35,6 +35,20 @@ def _secret(key):
         return (userdata.get(key) or '').strip()
     except Exception:
         return ''
+
+
+# Read-only GitHub token from Secrets - only needed if the repo is private.
+GH_TOKEN = _secret('GITHUB_TOKEN')
+
+
+def fetch_file(path, dst):
+    """Download one repo file via the GitHub API (works for private repos)."""
+    req = urllib.request.Request(REPO_API + path,
+                                 headers={'Accept': 'application/vnd.github.raw'})
+    if GH_TOKEN:
+        req.add_header('Authorization', 'Bearer ' + GH_TOKEN)
+    with urllib.request.urlopen(req) as r, open(dst, 'wb') as fh:
+        fh.write(r.read())
 
 
 # ---------------------------------------------------------------- UI widgets
@@ -118,17 +132,19 @@ def do_setup(_=None):
             subprocess.run('curl -fsSL https://bun.sh/install | bash', shell=True,
                            check=True, capture_output=True, text=True)
         say('✅ Bun ' + sh(['bun', '--version'], env=env()).stdout.strip() + ' is ready.')
-        say('⏳ Downloading the project files…')
+        say('⏳ Downloading the project files from GitHub…')
         os.makedirs(ROOT, exist_ok=True)
         for f in FILES:
             dst = os.path.join(ROOT, os.path.basename(f))
-            urllib.request.urlretrieve(RAW + f, dst)
+            fetch_file(f, dst)
             say('   • ' + os.path.basename(f))
         say('✅ Setup complete. Next: click "2 · Run tests".')
         set_status('Step 1 done — next: Step 2 (Run tests).')
     except Exception as e:
         say('❌ Setup failed: ' + str(e))
-        say('What to do: check the internet connection and click Setup again. ' + QUOTA_HINT)
+        say('What to do: check the internet connection and click Setup again. If the '
+            'GitHub repo is private, the notebook also needs a GITHUB_TOKEN secret '
+            '(a read-only GitHub token for this repo) — see "Help & notes" below.')
         set_status('Step 1 failed — see the Log at the bottom for what to do.')
 
 
