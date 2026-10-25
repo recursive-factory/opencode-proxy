@@ -252,7 +252,10 @@ Results:
 system prompt), proxy smoke test (`/health`, `/v1/models`, chat completion) all 200.
 Conclusion: the home-IP `FreeUsageLimitError` at the time was genuine per-IP quota
 exhaustion, not a fingerprint break — the dynamic prompt works as built. The
-notebook's minimize cell is present but intentionally not run (burns ~11 calls).
+notebook's tests were later consolidated into a single suite cell, and prompt
+minimization is an optional note there — intentionally not run (burns ~11 calls).
+The zrok share name is read from the Colab secret `ZROK_NAME` (default
+`oc-llm-proxy`).
 The notebook also exposes the Colab proxy two ways: a Cloudflare quick tunnel
 (random `*.trycloudflare.com` URL per start, no key) and zrok v2 (`zrok2`, token
 from the Colab `ZROK_TOKEN` secret) with the reserved fixed name
