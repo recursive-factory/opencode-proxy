@@ -37,8 +37,9 @@ out = widgets.Output(layout=widgets.Layout(max_height='300px', overflow_y='auto'
                                            border='1px solid #ccc', padding='6px'))
 result_out = widgets.Output()
 status = widgets.Label('Status: not started yet')
-name_text = widgets.Text(value=_secret('ZROK_NAME') or 'oc-llm-proxy',
-                         description='Share name:', layout=widgets.Layout(width='320px'))
+name_label = widgets.Label(
+    value='Share name: ' + (_secret('ZROK_NAME') or 'oc-llm-proxy') +
+          '  (from Colab Secrets: ZROK_NAME - read again when you press Start)')
 token_pw = widgets.Password(description='zrok token:', placeholder='only if not saved in Secrets',
                             layout=widgets.Layout(width='320px'))
 tunnel_choice = widgets.RadioButtons(
@@ -189,7 +190,8 @@ def start_zrok():
             return None
         sh(['zrok2', 'enable', '--headless', token])  # token never printed
         say('zrok enabled.')
-    name = name_text.value.strip() or 'oc-llm-proxy'
+    name = _secret('ZROK_NAME') or 'oc-llm-proxy'
+    say('Share name: ' + name + ' (from Colab secret ZROK_NAME)')
     sh(['zrok2', 'create', 'name', '-n', 'public', name])
     # Reclaim the name from any old session's share still holding it.
     listing = sh(['zrok2', 'list', 'shares'])
@@ -319,7 +321,7 @@ ask_btn.on_click(do_ask)
 
 display(HTML('<h3>Control panel - click the buttons in order: 1 → 2 → 3</h3>'))
 display(widgets.HBox([setup_btn, test_btn]))
-display(widgets.HBox([tunnel_choice, widgets.VBox([name_text, token_pw])]))
+display(widgets.HBox([tunnel_choice, widgets.VBox([name_label, token_pw])]))
 display(widgets.HBox([start_btn, stop_btn]))
 display(status)
 display(result_out)
