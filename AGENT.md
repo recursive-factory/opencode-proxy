@@ -261,7 +261,8 @@ non-coders (`notebooks/colab_panel.py`, exec'd by a one-line loader cell):
 Setup / Run tests / Start public URL / Stop buttons plus a try-it chat box;
 all step-by-step cells were removed. All code fetches (loader + panel Setup)
 go through the GitHub contents API and send `Authorization: Bearer
-<GITHUB_TOKEN>` when that Colab secret exists, so the notebook keeps working
+<OC_PROXY_GITHUB_REPO_TOKEN>` (fallback `GITHUB_TOKEN`) when that Colab
+secret exists, so the notebook keeps working
 if the repo is made private (fine-grained PAT, this repo only, Contents
 read-only).
 The notebook also exposes the Colab proxy two ways: a Cloudflare quick tunnel

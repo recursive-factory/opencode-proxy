@@ -38,7 +38,7 @@ def _secret(key):
 
 
 # Read-only GitHub token from Secrets - only needed if the repo is private.
-GH_TOKEN = _secret('GITHUB_TOKEN')
+GH_TOKEN = _secret('OC_PROXY_GITHUB_REPO_TOKEN') or _secret('GITHUB_TOKEN')
 
 
 def fetch_file(path, dst):
@@ -143,8 +143,9 @@ def do_setup(_=None):
     except Exception as e:
         say('❌ Setup failed: ' + str(e))
         say('What to do: check the internet connection and click Setup again. If the '
-            'GitHub repo is private, the notebook also needs a GITHUB_TOKEN secret '
-            '(a read-only GitHub token for this repo) — see "Help & notes" below.')
+            'GitHub repo is private, the notebook also needs an '
+            'OC_PROXY_GITHUB_REPO_TOKEN secret (a read-only GitHub token for this '
+            'repo) — see "Help & notes" below.')
         set_status('Step 1 failed — see the Log at the bottom for what to do.')
 
 

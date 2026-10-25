@@ -106,11 +106,11 @@ Colab secrets (🔑 in the left sidebar → **Secrets**, notebook access on):
 
 | Secret | Required | What it is |
 |---|---|---|
-| `GITHUB_TOKEN` | If this repo is private | A read-only GitHub token for this repo, so the notebook can download the code. Create it under GitHub → Settings → Developer settings → Fine-grained tokens, with access to only this repository and **Contents: Read-only** permission |
+| `OC_PROXY_GITHUB_REPO_TOKEN` | If this repo is private | A read-only GitHub token for this repo, so the notebook can download the code. Create it under GitHub → Settings → Developer settings → Fine-grained tokens, with access to only this repository and **Contents: Read-only** permission |
 | `ZROK_TOKEN` | For zrok | Your zrok enable token |
 | `ZROK_NAME` | For zrok | The name in your address, e.g. `my-proxy` → `https://my-proxy.shares.zrok.io` (no built-in default) |
 
-The notebook works whether this repo is public or private — with a private repo, the Open in Colab button will ask you to sign in to GitHub, and the panel downloads code using `GITHUB_TOKEN`. Without that secret, a private repo returns "404" and Setup fails.
+The notebook works whether this repo is public or private — with a private repo, the Open in Colab button will ask you to sign in to GitHub, and the panel downloads code using `OC_PROXY_GITHUB_REPO_TOKEN`. Without that secret, a private repo returns "404" and Setup fails.
 
 **Quota used up?** The tunnel points at one Colab runtime, so a dead runtime = dead address. Menu **Runtime → Restart session**, run the panel, click 1 → 2 → 3 again. The zrok address stays the same (the panel reclaims the name from the old session automatically); client configs never change.
 
