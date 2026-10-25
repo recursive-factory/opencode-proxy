@@ -43,8 +43,9 @@ name_label = widgets.Label(
 token_pw = widgets.Password(description='zrok token:', placeholder='only if not saved in Secrets',
                             layout=widgets.Layout(width='320px'))
 tunnel_choice = widgets.RadioButtons(
-    options=[('zrok - fixed URL (recommended)', 'zrok'), ('Cloudflare - random URL', 'cloudflare')],
-    value='zrok', description='Tunnel:')
+    options=[('zrok — fixed address (recommended)', 'zrok'),
+             ('Cloudflare — random address, no account needed', 'cloudflare')],
+    value='zrok', description='', layout=widgets.Layout(width='auto'))
 model_dd = widgets.Dropdown(options=MODELS, value='big-pickle', description='Model:')
 prompt_text = widgets.Text(value='Say hi in exactly five words.', description='Ask:',
                            layout=widgets.Layout(width='420px'))
@@ -319,14 +320,43 @@ start_btn.on_click(do_start)
 stop_btn.on_click(do_stop)
 ask_btn.on_click(do_ask)
 
-display(HTML('<h3>Control panel - click the buttons in order: 1 → 2 → 3</h3>'))
-display(widgets.HBox([setup_btn, test_btn]))
-display(widgets.HBox([tunnel_choice, widgets.VBox([name_label, token_pw])]))
-display(widgets.HBox([start_btn, stop_btn]))
-display(status)
-display(result_out)
-display(HTML('<b>Try it right here:</b> pick a model, type a question, click Ask.'))
-display(widgets.HBox([model_dd, prompt_text, ask_btn]))
-display(HTML('<b>Log:</b>'))
-display(out)
+zrok_fields = widgets.VBox([name_label, token_pw])
+
+
+def _on_tunnel_change(change):
+    # The name/token boxes only matter for zrok - hide them for Cloudflare.
+    zrok_fields.layout.display = '' if change['new'] == 'zrok' else 'none'
+
+
+tunnel_choice.observe(_on_tunnel_change, names='value')
+
+
+def section(title, children):
+    return widgets.VBox(
+        [widgets.HTML('<h4 style="margin:4px 0 8px 0">' + title + '</h4>')] + children,
+        layout=widgets.Layout(border='1px solid #dadce0', border_radius='8px',
+                              padding='10px 12px', margin='8px 0'))
+
+
+panel = widgets.VBox([
+    widgets.HTML('<h3 style="margin:4px 0">🎛️ Control panel — work through the steps in order</h3>'),
+    section('Step 1 · Get ready', [
+        setup_btn,
+        widgets.Label('Installs everything this notebook needs (one-time, about 30 seconds).')]),
+    section('Step 2 · Check it works', [
+        test_btn,
+        widgets.Label('Runs the tests; results appear in the Log at the bottom.')]),
+    section('Step 3 · Your public address', [
+        widgets.HTML('<b>How should people reach it?</b>'),
+        tunnel_choice,
+        zrok_fields,
+        widgets.HBox([start_btn, stop_btn]),
+        status,
+        result_out]),
+    section('💬 Try the models', [
+        widgets.HBox([model_dd, prompt_text, ask_btn]),
+        widgets.Label('Pick a model, type a question, click Ask. Uses the running proxy.')]),
+    section('📜 Log', [out]),
+])
+display(panel)
 say('Panel ready. Start with "1. Setup".')
