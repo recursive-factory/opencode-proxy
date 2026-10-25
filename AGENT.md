@@ -254,8 +254,9 @@ Conclusion: the home-IP `FreeUsageLimitError` at the time was genuine per-IP quo
 exhaustion, not a fingerprint break — the dynamic prompt works as built. The
 notebook's tests were later consolidated into a single suite cell, and prompt
 minimization is an optional note there — intentionally not run (burns ~11 calls).
-The zrok share name is read from the Colab secret `ZROK_NAME` (default
-`oc-llm-proxy`). The notebook UI is now an ipywidgets control panel for
+The zrok share name is read from the Colab secret `ZROK_NAME` — there is no
+built-in default; Start stops with instructions if it is unset (the
+`oc-llm-proxy` name in the 2026-10-25 results below was the then-default). The notebook UI is now an ipywidgets control panel for
 non-coders (`notebooks/colab_panel.py`, exec'd by a one-line loader cell):
 Setup / Run tests / Start public URL / Stop buttons plus a try-it chat box;
 all step-by-step cells were removed.
