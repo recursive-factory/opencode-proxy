@@ -1,0 +1,17 @@
+{
+  "name": "opencode-proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "list": "bun run src/hit-model.ts --list",
+    "probe": "bun run src/hit-model.ts --probe",
+    "all-free": "bun run src/hit-model.ts --all-free",
+    "proxy": "bun run src/proxy.ts",
+    "minimize": "bun run src/minimize-system.ts",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "bun-types": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}
