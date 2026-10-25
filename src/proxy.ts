@@ -10,9 +10,14 @@
  *
  * The downstream agent's system prompt, messages, and tools are forwarded
  * as-is, with three minimal gate repairs (each verified live):
- *   1. System: the captured OpenCode agent system prompt is PREPENDED to the
- *      client's system prompt. Client system alone (even long) -> 429;
- *      combined -> 200. The client's instructions still follow.
+ *   1. System: downstream clients (Cline / VS Code) are the agent — their
+ *      system prompt is the only persona. The upstream gate is measured
+ *      (2026-10-25, fresh-IP ablation) to check only an `<env>` block with
+ *      a `Working directory:` line, so by default (PROXY_SYSTEM=minimal)
+ *      the proxy appends just that ~60-char stub to the client system.
+ *      PROXY_SYSTEM=full restores the legacy 13k OpenCode prepend; on a
+ *      429 in minimal mode the proxy retries once with the full prompt
+ *      and stays in full mode for 1h (gate-rotation self-heal).
  *   2. Tools: upstream requires a tool literally named `read` (verified:
  *      `edit`/`bash`/fake names alone -> 429; any `read` definition -> 200).
  *      The proxy adds NO toolset of its own — if the client has no `read`,
@@ -25,11 +30,17 @@
  *      latest-CLI User-Agent. See fingerprint.ts for the full evidence.
  * Client auth is ignored unless PROXY_API_KEY is set (then Bearer must match).
  */
-import { BASE, FALLBACK_FREE, SYSTEM_TEMPLATE, buildSystemPrompt, isFree, upstreamHeaders } from "./fingerprint.ts";
+import { appendFile } from "node:fs/promises";
+import { BASE, FALLBACK_FREE, SYSTEM_TEMPLATE, buildMinimalSystem, buildSystemPrompt, isFree, upstreamHeaders } from "./fingerprint.ts";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "127.0.0.1";
 const PROXY_KEY = process.env.PROXY_API_KEY || "";
+/** System-prompt mode: "minimal" (env stub, default) or "full" (13k prepend). */
+const SYSTEM_MODE = (process.env.PROXY_SYSTEM || "minimal").toLowerCase() === "full" ? "full" : "minimal";
+/** After a minimal-mode 429 fallback, stay in full mode until this time. */
+let fullModeUntil = 0;
+const effectiveSystemMode = (): "minimal" | "full" => (SYSTEM_MODE === "full" || Date.now() < fullModeUntil ? "full" : "minimal");
 if (!(await Bun.file(SYSTEM_TEMPLATE).exists())) console.error("WARN: opencode-system.txt missing — upstream will likely 429 every request");
 
 // ------------------------------------------------------------- transform ---
@@ -39,13 +50,17 @@ const setToolName = (t: any, name: string) => { if (t?.function) t.function.name
 const textOf = (content: any): string =>
   typeof content === "string" ? content : Array.isArray(content) ? content.map((p) => p?.text || "").join("") : "";
 
-async function transformRequest(client: AnyObj) {
+async function transformRequest(client: AnyObj, mode: "minimal" | "full" = effectiveSystemMode()) {
   const model = String(client.model || "big-pickle").replace(/^opencode\//, "");
-  const ocSystem = await buildSystemPrompt(model);
   const messages: any[] = Array.isArray(client.messages) ? client.messages : [];
   const clientSystem = messages.filter((m) => m?.role === "system").map((m) => textOf(m.content)).filter(Boolean).join("\n\n");
+  // minimal: client system is the only persona, env stub appended (gate token).
+  // full: legacy behaviour — OpenCode prompt prepended, client system follows.
+  const system = mode === "full"
+    ? await buildSystemPrompt(model).then((oc) => (clientSystem ? `${oc}\n\n${clientSystem}` : oc))
+    : buildMinimalSystem(clientSystem);
   const upstreamMessages = [
-    { role: "system", content: clientSystem ? `${ocSystem}\n\n${clientSystem}` : ocSystem },
+    { role: "system", content: system },
     ...messages.filter((m) => m?.role !== "system"),
   ];
 
@@ -98,21 +113,38 @@ async function handleChat(req: Request): Promise<Response> {
   const started = Date.now();
   let client: AnyObj;
   try { client = (await req.json()) as AnyObj; } catch { return json(errBody("invalid JSON body"), 400); }
-  const { model, body, renameBack, suppress } = await transformRequest(client);
-  // One-line request summary — the fastest way to see how a client differs.
-  const toolNames = (body.tools || []).map(toolName);
-  const msgChars = (body.messages || []).reduce((n: number, m: any) => n + textOf(m.content).length + JSON.stringify(m.tool_calls || "").length, 0);
-  console.log(`→ ${model} stream=${!!client.stream} msgs=${(body.messages || []).length} chars=${msgChars} tools=[${toolNames.join(",")}] renameBack=${JSON.stringify(Object.fromEntries(renameBack))}`);
-  if (process.env.PROXY_DUMP) {
-    const rec = JSON.stringify({ ts: new Date().toISOString(), client, upstreamBody: body }) + "\n";
-    await Bun.write(`${import.meta.dir}/.proxy-dump.jsonl`, (await Bun.file(`${import.meta.dir}/.proxy-dump.jsonl`).text().catch(() => "")) + rec).catch(() => {});
-  }
+  let sysMode = effectiveSystemMode();
+  let { model, body, renameBack, suppress } = await transformRequest(client, sysMode);
   if (!isFree(model)) return json(errBody(`model '${model}' is not a free model`, "invalid_request_error", { code: "model_not_free" }), 400);
   if (model === "jev-1.13-free") return json(errBody("jev-1.13-free uses an unsupported endpoint"), 400);
 
-  const upstream = await fetch(`${BASE}/openai/v1/chat/completions`, {
-    method: "POST", headers: await upstreamHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(300_000),
+  const attempt = async (b: AnyObj) => fetch(`${BASE}/openai/v1/chat/completions`, {
+    method: "POST", headers: await upstreamHeaders(), body: JSON.stringify(b), signal: AbortSignal.timeout(300_000),
   }).catch(() => null);
+  let upstream = await attempt(body);
+  // Gate-rotation self-heal: minimal shape rejected (429) -> retry once with
+  // the full prompt and stay in full mode for 1h. A genuine quota 429 fails
+  // the retry too and is returned as-is (one extra call, only on failure).
+  if (upstream && upstream.status === 429 && sysMode === "minimal") {
+    await upstream.text().catch(() => {});
+    console.log(`↺ ${model} minimal-mode 429 — retrying with full system prompt`);
+    sysMode = "full"; fullModeUntil = Date.now() + 3_600_000;
+    ({ model, body, renameBack, suppress } = await transformRequest(client, "full"));
+    upstream = await attempt(body);
+  }
+  // One-line request summary — the fastest way to see how a client differs.
+  const toolNames = (body.tools || []).map(toolName);
+  const msgChars = (body.messages || []).reduce((n: number, m: any) => n + textOf(m.content).length + JSON.stringify(m.tool_calls || "").length, 0);
+  const sysChars = textOf(body.messages?.[0]?.content).length;
+  console.log(`→ ${model} sys=${sysMode} sysChars=${sysChars} stream=${!!client.stream} msgs=${(body.messages || []).length} chars=${msgChars} tools=[${toolNames.join(",")}] renameBack=${JSON.stringify(Object.fromEntries(renameBack))}`);
+  if (process.env.PROXY_DUMP) {
+    // Append one line per request (never rewrite the whole file). Panel/Colab
+    // sets PROXY_DUMP_FILE so the dump lands in /content/opencode-proxy even
+    // in the flat Colab layout; locally it sits beside this source file.
+    const dumpFile = process.env.PROXY_DUMP_FILE || `${import.meta.dir}/.proxy-dump.jsonl`;
+    const rec = JSON.stringify({ ts: new Date().toISOString(), sysMode, client, upstreamBody: body }) + "\n";
+    await appendFile(dumpFile, rec).catch(() => {});
+  }
   if (!upstream) return json(errBody("upstream unreachable", "upstream_error"), 502);
   if (!upstream.ok || !upstream.body) {
     console.log(`✗ ${model} -> upstream ${upstream.status} (${Date.now() - started}ms)`);

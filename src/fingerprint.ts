@@ -10,8 +10,12 @@
  *   - Session: ses_<12 hex><14 base62> where the hex encodes the *descending*
  *     OpenCode identifier ~(Date.now() * 0x1000 + counter) & 2^48-1.
  *     Ascending timestamps and UUIDs are decoded and rejected.
- *   - System: the full captured OpenCode agent prompt must be present
- *     (generic/truncated system prompts -> 429).
+ *   - System: an `<env>` block containing a `Working directory:` line must
+ *     be present in the system prompt (measured 2026-10-25 on a fresh Colab
+ *     IP via custom-agent captures + ablation: head / tool catalog / skills
+ *     are NOT gated; client system + env stub alone -> 200 on big-pickle,
+ *     deepseek-v4.1-flash-free, glm-5.3-flash-free, incl. a tool call).
+ *     The full captured prompt also passes and is kept as fallback.
  *   - Tools: a tool literally named `read` must be present (edit/bash/fake
  *     names alone are rejected; any `read` definition passes).
  * If upstream answers 429 FreeUsageLimitError on a previously-working shape,
@@ -162,6 +166,24 @@ export async function buildSystemPrompt(model: string): Promise<string> {
     .replace(/Platform: .*/, `Platform: ${process.platform}`)
     .replace(/Is directory a git repo: .*/, `Is directory a git repo: ${git ? "yes" : "no"}`)
     .replace(/Prefer \/private\/var\/folders\/\S+\/T\/opencode/, `Prefer ${tmpdir()}opencode`);
+}
+
+/**
+ * Minimal gate stub (2026-10-25): the only part of the system prompt the
+ * upstream gate is measured to check is an `<env>` block containing a
+ * `Working directory:` line. The value is not validated (a fake `/x`
+ * passed), but we send a truthful path so the model never sees a fake cwd.
+ * Workdir resolution: PROXY_WORKDIR override, else this process's cwd.
+ */
+export function buildEnvStub(workdir = process.env.PROXY_WORKDIR || process.cwd()): string {
+  return `<env>\n  Working directory: ${workdir}\n</env>`;
+}
+
+/** Minimal system for downstream-agent requests: client's own system prompt
+ *  first (it is the only agent persona), env stub appended as gate token. */
+export function buildMinimalSystem(clientSystem: string): string {
+  const stub = buildEnvStub();
+  return clientSystem ? `${clientSystem}\n${stub}` : stub;
 }
 
 // --------------------------------------------------------------- headers ---
