@@ -522,7 +522,10 @@ opencode_btn = widgets.ToggleButton(
 )
 
 
-def do_opencode_mode(btn):
+def do_opencode_mode(change):
+    # ToggleButton has no .on_click (only Button does) - it reports value
+    # changes via .observe(), which passes a change dict, not the widget.
+    btn = change.get('owner', opencode_btn) if isinstance(change, dict) else change
     if _RESTORING['on']:
         return
     STATE['opencode'] = bool(btn.value)
@@ -557,7 +560,7 @@ def do_opencode_mode(btn):
         say('It applies the next time the proxy starts.')
 
 
-opencode_btn.on_click(do_opencode_mode)
+opencode_btn.observe(do_opencode_mode, names='value')
 
 # The Colab VM disk is wiped on disconnect. The choice lives in this browser
 # (localStorage) so the startup cell can turn OpenCode mode back on before
