@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Colab - Limit Auto-Switch
 // @namespace    opencode-proxy
-// @version      1.3.1
-// @description  When the OpenCode free limit is hit in Colab: delete the runtime assignment via API, reload the page, click Run all (which makes Colab connect to a fresh runtime AND runs the panel cell; Connect button is only a fallback), and verify a fresh assignment is live. The proxy then boots in OpenCode mode on the fresh session.
+// @version      1.4.0
+// @description  When the OpenCode free limit is hit in Colab: delete the runtime assignment via API, reload the page, press Ctrl+F9 (Run all - Colab connects to a fresh runtime AND runs the panel cell; button clicks are only fallbacks), and verify a fresh assignment is live. The proxy then boots in OpenCode mode on the fresh session.
 // @match        https://colab.research.google.com/*
 // @run-at       document-idle
 // @grant        none
@@ -77,6 +77,24 @@
     const btn = deepFind(connectEl, el => el.tagName === 'BUTTON');
     if (!fire(btn || connectEl)) return false;
     sayBadge('🖱️ clicked Connect - waiting for a new assignment…');
+    return true;
+  };
+  // Ctrl+F9 = Colab's "Run all cells" shortcut. Dispatching the keyboard
+  // event is far more robust than clicking through 3 shadow roots, and
+  // with no runtime attached Colab connects to a fresh one first - so
+  // this one event both reconnects and runs the panel. keyCode/which are
+  // legacy read-only props some shortcut handlers still check, so define
+  // them explicitly (120 = F9).
+  const pressRunAllShortcut = () => {
+    const makeKey = (type) => {
+      const e = new KeyboardEvent(type, { key: 'F9', code: 'F9', ctrlKey: true, bubbles: true, cancelable: true, composed: true });
+      Object.defineProperty(e, 'keyCode', { get: () => 120 });
+      Object.defineProperty(e, 'which', { get: () => 120 });
+      return e;
+    };
+    const target = (document.activeElement && document.activeElement !== document.body) ? document.activeElement : document.body;
+    target.dispatchEvent(makeKey('keydown'));
+    target.dispatchEvent(makeKey('keyup'));
     return true;
   };
   const clickRunAll = async () => {
@@ -192,12 +210,12 @@
   };
 
   // ------------------------------------------------------------- switching
-  // Reconnect strategy: click the toolbar's Run all button. With no
-  // runtime attached, Colab connects to a fresh one on its own and then
-  // runs the cells - and the panel is the notebook's only code cell, so
-  // that single click both reconnects and boots the panel. Only if no
-  // new assignment shows up within a minute do we fall back to clicking
-  // Connect explicitly (its click also lands sooner on some accounts).
+  // Reconnect strategy: press Ctrl+F9 (Run all). With no runtime
+  // attached, Colab connects to a fresh one on its own and then runs
+  // the cells - and the panel is the notebook's only code cell, so that
+  // one keypress both reconnects and boots the panel. If no new
+  // assignment shows up within a minute, fall back to clicking the Run
+  // all / Connect buttons through the shadow DOM.
   async function waitForNewAssignment(deletedId) {
     const deadline = Date.now() + CONNECT_TIMEOUT_MS;
     const started = Date.now();
@@ -211,10 +229,11 @@
       if (Date.now() - lastAction > 10000) {
         let acted = false;
         if (Date.now() - started < 60000) {
-          acted = await clickRunAll();
-          if (acted) sayBadge('▶️ clicked Run all - Colab connects to a fresh runtime and runs the panel…');
+          acted = pressRunAllShortcut();
+          if (acted) sayBadge('⌨️ pressed Ctrl+F9 (Run all) - Colab connects to a fresh runtime and runs the panel…');
+        } else {
+          acted = (await clickRunAll()) || clickConnect();
         }
-        if (!acted) acted = clickConnect();
         if (acted) lastAction = Date.now();
       }
       await sleep(3000);
@@ -279,18 +298,25 @@
       await sleep(2500);
     }
     if (panelState() === 'missing') { sayBadge('⚠️ panel cell not found - run it manually'); return; }
-    if (await clickRunAll()) {
-      sayBadge('▶️ panel did not auto-run - clicked Run all (panel is the only code cell)');
-      const deadline = Date.now() + 30000;
+    // Stage 1: keyboard shortcut. Stage 2 (if the panel still has not
+    // started 10s later): click the Run all button through its shadow DOM.
+    const waitStarted = async (ms) => {
+      const deadline = Date.now() + ms;
       while (Date.now() < deadline) {
         const s = panelState();
-        if (s === 'running' || s === 'ran') { sayBadge('✅ panel is running on the new session'); return; }
+        if (s === 'running' || s === 'ran') { sayBadge('✅ panel is running on the new session'); return true; }
         await sleep(2500);
       }
-      sayBadge('⚠️ clicked Run all but the panel still has not started - check the page');
-    } else {
-      sayBadge('⚠️ Run all not found - press Cmd/Ctrl+F9 manually');
+      return false;
+    };
+    pressRunAllShortcut();
+    sayBadge('⌨️ panel did not auto-run - pressed Ctrl+F9 (Run all; panel is the only code cell)');
+    if (await waitStarted(10000)) return;
+    if (await clickRunAll()) {
+      sayBadge('▶️ shortcut did not take - clicked the Run all button instead');
+      if (await waitStarted(20000)) return;
     }
+    sayBadge('⚠️ panel still has not started - press Ctrl+F9 manually');
   }
 
   // Panel -> page signal (see header comment). Origin must be the kernel's
