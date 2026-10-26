@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Colab - Limit Auto-Switch
 // @namespace    opencode-proxy
-// @version      1.0.0
-// @description  When the OpenCode free limit is hit in Colab: delete the runtime assignment via API, reload the page, wait for it to load, click Connect (through its shadow DOM), and verify a fresh assignment is live. The panel cell (Run on startup) then boots the proxy in OpenCode mode.
+// @version      1.1.0
+// @description  When the OpenCode free limit is hit in Colab: delete the runtime assignment via API, reload the page, click Connect (through its shadow DOM), verify a fresh assignment is live, then make sure the panel cell runs (Run all if startup did not). The proxy then boots in OpenCode mode on the fresh session.
 // @match        https://colab.research.google.com/*
 // @run-at       document-idle
 // @grant        none
@@ -13,15 +13,23 @@
 // It lives in the browser, so unlike a pasted console script it survives reloads.
 // Manual controls in the page console:  __ocAutoSwitch.now()  /  __ocAutoSwitch.stop()
 // Or click the small badge at the bottom-right to switch immediately.
+//
+// How the limit signal reaches this script: the Colab kernel's JS runs in a
+// cross-origin output iframe (*.colab.googleusercontent.com). Its DOM,
+// title and localStorage are invisible from this page, so the panel signals
+// with window.top.postMessage({type:'oc-limit-hit', ts, source}) instead
+// (see notebooks/colab_panel.py: notify_limit_hit). That is the ONLY
+// trigger - scanning this page's DOM for the banner cannot work.
 
 (function () {
   'use strict';
 
   // ---------------------------------------------------------------- config
-  const AUTO_ON_LIMIT = true;        // switch automatically when the panel banner appears
+  const AUTO_ON_LIMIT = true;        // switch automatically on the panel's limit signal
   const MAX_PER_HOUR = 2;            // loop guard (persisted in localStorage)
   const AFTER_LOAD_WAIT_MS = 5000;   // after a reload, wait this long before clicking Connect
   const CONNECT_TIMEOUT_MS = 300000; // give up after 5 min
+  const PANEL_GRACE_MS = 25000;      // after reconnect, give run-on-startup this long before clicking Run all ourselves
   const FLAG = 'oc-switch-reload';   // sessionStorage: survives reload, per tab
   const TIMES = 'oc-limit-switch-times';
 
@@ -37,33 +45,63 @@
   badge.addEventListener('click', () => { if (confirm('Switch Colab session now? This deletes the current runtime.')) switchNow('badge click'); });
   (document.body || document.documentElement).appendChild(badge);
 
-  // ---------------------------------------------------------------- helpers
+  // ------------------------------------------------------------- DOM utils
   const fire = (el) => {
+    if (!el) return false;
     for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'])
       el.dispatchEvent(new MouseEvent(type, { bubbles: true, composed: true, cancelable: true, view: window }));
+    return true;
   };
+  // Depth-first search that also descends into shadow roots (incl. root's own).
   const deepFind = (root, pred) => {
-    if (!root?.querySelectorAll) return null;
-    for (const el of root.querySelectorAll('*')) {
-      if (pred(el)) return el;
-      if (el.shadowRoot) { const hit = deepFind(el.shadowRoot, pred); if (hit) return hit; }
+    if (!root) return null;
+    if (root.nodeType === 1 && pred(root)) return root;
+    if (root.shadowRoot) { const hit = deepFind(root.shadowRoot, pred); if (hit) return hit; }
+    if (root.querySelectorAll) {
+      for (const el of root.querySelectorAll('*')) {
+        if (pred(el)) return el;
+        if (el.shadowRoot) { const hit = deepFind(el.shadowRoot, pred); if (hit) return hit; }
+      }
     }
     return null;
   };
   const clickConnect = () => {
     // colab-connect-button -> (shadow) colab-toolbar-button#connect
-    //   -> (shadow) md-text-button#button -> (shadow) button#button
+    //   -> (shadow) md-text-button#button -> (shadow) button
     // (the sibling #connect-dropdown arrow is a different branch - avoided
     //  by searching only inside #connect)
     const host = document.querySelector('colab-connect-button');
     if (!host) return false;
-    const toolbar = host.shadowRoot?.querySelector('#connect') || host;
-    const btn = deepFind(toolbar.shadowRoot || toolbar, el => el.tagName === 'BUTTON');
-    fire(btn || toolbar);
+    const connectEl = deepFind(host, el => el.id === 'connect');
+    if (!connectEl) return false; // shadow DOM not rendered yet - caller retries
+    const btn = deepFind(connectEl, el => el.tagName === 'BUTTON');
+    if (!fire(btn || connectEl)) return false;
     sayBadge('🖱️ clicked Connect - waiting for a new assignment…');
     return true;
   };
+  const clickRunAll = async () => {
+    // Toolbar first: #toolbar-run-button -> (shadow) md-text-button
+    //   -> (shadow) button.
+    const runHost = document.querySelector('#toolbar-run-button');
+    if (runHost) {
+      const btn = deepFind(runHost, el => el.tagName === 'BUTTON');
+      if (fire(btn || runHost)) return true;
+    }
+    // Fallback: Runtime menu -> [command="runall"] (Cmd/Ctrl+F9 equivalent).
+    // goog-* menus open on mousedown, which fire() already sends.
+    const menuBtn = document.querySelector('#runtime-menu-button');
+    if (!menuBtn) return false;
+    fire(menuBtn);
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline) {
+      const item = document.querySelector('[command="runall"]');
+      if (item) return fire(item);
+      await sleep(300);
+    }
+    return false;
+  };
 
+  // ------------------------------------------------------- Colab RPC (API)
   const cookie = (name) => {
     const hit = document.cookie.split('; ').find(c => c.startsWith(name + '='));
     return hit ? hit.slice(name.length + 1) : null;
@@ -98,23 +136,7 @@
   };
 
   const ID_RE = /^m-[a-z0-9]+(?:-[a-z0-9]+)+$/;
-  const listIds = async () => {
-    const data = await rpc('ListAssignments', []);
-    const ids = [];
-    const walk = (v) => {
-      if (!Array.isArray(v)) return;
-      if (typeof v[0] === 'string' && ID_RE.test(v[0])) ids.push(v[0]);
-      v.forEach(walk);
-    };
-    walk(data);
-    return [...new Set(ids)];
-  };
-  const flatten = (v, out = []) => {
-    if (typeof v === 'string') out.push(v);
-    else if (Array.isArray(v)) v.forEach(x => flatten(x, out));
-    return out;
-  };
-  const pickCurrentAssignment = async () => {
+  const listRecords = async () => {
     const data = await rpc('ListAssignments', []);
     const records = [];
     const walk = (v) => {
@@ -123,8 +145,21 @@
       v.forEach(walk);
     };
     walk(data);
+    return records;
+  };
+  const listIds = async () => [...new Set((await listRecords()).map(r => r[0]))];
+  const flatten = (v, out = []) => {
+    if (typeof v === 'string') out.push(v);
+    else if (Array.isArray(v)) v.forEach(x => flatten(x, out));
+    return out;
+  };
+  const pickCurrentAssignment = async () => {
+    const records = await listRecords();
     if (!records.length) return null;
     if (records.length === 1) return records[0][0];
+    // Multiple live assignments: only delete when one matches this
+    // notebook (its hash shows up in the page's storage / URL). When
+    // unsure, delete nothing - a wrong delete kills someone else's VM.
     const pageSources = [location.href, ...Object.values(localStorage), ...Object.values(sessionStorage)].join('\n');
     const byHash = records.find(r => flatten(r).some(s => s.length >= 40 && pageSources.includes(s)));
     if (byHash) return byHash[0];
@@ -140,6 +175,7 @@
     return a;
   };
 
+  // ------------------------------------------------------------- switching
   async function waitForNewAssignment(deletedId) {
     const deadline = Date.now() + CONNECT_TIMEOUT_MS;
     let lastClick = 0;
@@ -147,7 +183,7 @@
     while (Date.now() < deadline) {
       try {
         const fresh = (await listIds()).filter(id => id !== deletedId);
-        if (fresh.length) { sayBadge('✅ new session live: ' + fresh[0] + ' - panel autostart is booting the proxy'); return fresh[0]; }
+        if (fresh.length) { sayBadge('✅ new session live: ' + fresh[0]); return fresh[0]; }
       } catch (e) { /* backend mid-switch */ }
       if (Date.now() - lastClick > 8000) { if (clickConnect()) lastClick = Date.now(); }
       await sleep(3000);
@@ -159,20 +195,20 @@
   let switching = false;
   async function switchNow(reason) {
     if (switching) return;
-    const times = recentSwitches();
-    if (times.length >= MAX_PER_HOUR) { sayBadge('⚠️ already switched ' + times.length + 'x this hour - paused (' + reason + ')'); return; }
+    if (recentSwitches().length >= MAX_PER_HOUR) { sayBadge('⚠️ already switched ' + MAX_PER_HOUR + 'x this hour - paused (' + reason + ')'); return; }
     switching = true;
     try {
       sayBadge('🚨 limit hit - finding current assignment… (' + reason + ')');
       const id = await pickCurrentAssignment();
       if (!id) { sayBadge('⚠️ could not identify the current assignment - not deleting anything'); return; }
-      times.push(Date.now());
-      localStorage.setItem(TIMES, JSON.stringify(times));
-      sessionStorage.setItem(FLAG, JSON.stringify({ ts: Date.now(), deletedId: id }));
       sayBadge('🗑️ deleting ' + id + ' then reloading…');
       await rpc('DeleteAssignment', [id]);
+      // Only a successful delete counts against the loop guard.
+      const times = recentSwitches(); times.push(Date.now());
+      localStorage.setItem(TIMES, JSON.stringify(times));
+      sessionStorage.setItem(FLAG, JSON.stringify({ ts: Date.now(), deletedId: id }));
       await sleep(600);
-      location.reload(); // phase 2 below runs after load (userscript survives)
+      location.reload(); // phase 2 in main() runs after load (userscript survives)
     } catch (e) {
       sayBadge('❌ switch failed: ' + e.message);
     } finally {
@@ -182,56 +218,46 @@
 
   // Colab's run-on-startup (autoexec) fires once per notebook *page load*,
   // not per runtime assignment: reconnecting in the same page does not
-  // re-run it (the cell keeps its old execution_count). Our reload should
-  // make it fire, but do not depend on it - if the panel cell still shows
-  // its stale saved count after the new kernel settles, click its run
-  // button (deep, through colab-run-button's shadow DOM) ourselves.
+  // re-run it. Our reload normally makes it fire once the new kernel
+  // connects - give it a short grace period, watching the panel cell's
+  // prompt ([*] = running, [1] = first cell of the fresh kernel done).
+  // If it still has not started, click Run all ourselves: the panel is
+  // the notebook's only code cell, so Run all == run the panel.
   async function ensurePanelStarted() {
     const findPanel = () => [...document.querySelectorAll('.cell')]
       .find(c => (c.textContent || '').includes('colab_panel.py'));
-    const deadline = Date.now() + 90000;
-    while (Date.now() < deadline) {
+    const panelState = () => {
       const panel = findPanel();
-      if (panel) {
-        const head = (panel.innerText || '').slice(0, 300);
-        const count = head.match(/\[\s*(\d+|\*)\s*\]/)?.[1];
-        if (count === '*' || count === '1') { sayBadge('✅ panel auto-ran on the new session'); return; }
+      if (!panel) return 'missing';
+      const head = (panel.innerText || '').slice(0, 300);
+      const count = head.match(/\[\s*(\d+|\*)\s*\]/)?.[1];
+      if (count === '*') return 'running';
+      if (count === '1') return 'ran';
+      return 'idle';
+    };
+    const graceDeadline = Date.now() + PANEL_GRACE_MS;
+    while (Date.now() < graceDeadline) {
+      const s = panelState();
+      if (s === 'running' || s === 'ran') { sayBadge('✅ panel auto-ran on the new session - proxy is booting'); return; }
+      await sleep(2500);
+    }
+    if (panelState() === 'missing') { sayBadge('⚠️ panel cell not found - run it manually'); return; }
+    if (await clickRunAll()) {
+      sayBadge('▶️ panel did not auto-run - clicked Run all (panel is the only code cell)');
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        const s = panelState();
+        if (s === 'running' || s === 'ran') { sayBadge('✅ panel is running on the new session'); return; }
+        await sleep(2500);
       }
-      await sleep(5000);
-    }
-    if (!findPanel()) { sayBadge('⚠️ panel cell not found - run it manually'); return; }
-    // Run all == run the panel: it is the notebook's only code cell, the
-    // rest are markdown. First choice: the toolbar's own Run-all button
-    // (#toolbar-run-button -> (shadow) md-text-button -> (shadow) button).
-    const runHost = document.querySelector('#toolbar-run-button');
-    const runBtn = runHost && deepFind(runHost.shadowRoot || runHost, el => el.tagName === 'BUTTON');
-    if (runBtn || runHost) {
-      fire(runBtn || runHost);
-      sayBadge('▶️ panel did not auto-run - clicked the toolbar Run all button');
-      return;
-    }
-    // Fallback: Runtime menu -> [command="runall"] (Cmd/Ctrl+F9 equivalent).
-    // goog-* menus open on mousedown, which fire() already sends.
-    const menuBtn = document.querySelector('#runtime-menu-button');
-    if (!menuBtn) { sayBadge('⚠️ Runtime menu not found - press Cmd/Ctrl+F9 manually'); return; }
-    fire(menuBtn);
-    const menuDeadline = Date.now() + 6000;
-    let item = null;
-    while (Date.now() < menuDeadline && !item) {
-      item = document.querySelector('[command="runall"]');
-      if (!item) await sleep(300);
-    }
-    if (item) {
-      fire(item);
-      sayBadge('▶️ panel did not auto-run - invoked Runtime → Run all (only code cell is the panel)');
+      sayBadge('⚠️ clicked Run all but the panel still has not started - check the page');
     } else {
-      sayBadge('⚠️ Run all menu item not found - press Cmd/Ctrl+F9 manually');
+      sayBadge('⚠️ Run all not found - press Cmd/Ctrl+F9 manually');
     }
   }
 
-  // Panel -> page signal: the kernel's JS lives in a cross-origin output
-  // frame (*.colab.googleusercontent.com), so its DOM/storage/title are
-  // invisible here. It posts {type:'oc-limit-hit'} to window.top instead.
+  // Panel -> page signal (see header comment). Origin must be the kernel's
+  // output frame; ts guards against replayed/stale signals.
   window.addEventListener('message', (e) => {
     let host = '';
     try { host = new URL(e.origin).hostname; } catch (err) {}
@@ -240,6 +266,7 @@
     if (d.type === 'oc-limit-test') { sayBadge('✅ test signal received from panel (no switch)'); return; }
     if (d.type === 'oc-limit-clear') { sayBadge('✅ panel reports requests working again'); return; }
     if (d.type === 'oc-limit-hit') {
+      if (!AUTO_ON_LIMIT) { sayBadge('🔕 limit signal received but AUTO_ON_LIMIT is off'); return; }
       if (d.ts && Date.now() - d.ts > 120000) { sayBadge('⚠️ ignored stale limit signal'); return; }
       switchNow('postMessage from panel (' + (d.source || '?') + ')');
     }
@@ -247,7 +274,8 @@
 
   // ---------------------------------------------------------------- phases
   async function main() {
-    // Phase 2: we just reloaded after a delete -> connect to a fresh runtime.
+    // Phase 2: we just reloaded after a delete -> connect to a fresh
+    // runtime, then make sure the panel cell runs on it.
     let flag = null;
     try { flag = JSON.parse(sessionStorage.getItem(FLAG) || 'null'); } catch (e) {}
     if (flag && Date.now() - flag.ts < 600000) {
@@ -257,15 +285,8 @@
       return;
     }
 
-    // Phase 1: watch for the panel's limit signal (banner text or tab title).
-    if (!AUTO_ON_LIMIT) { sayBadge('🔔 limit auto-switch: manual only (badge click or __ocAutoSwitch.now())'); return; }
-    const looksLikeLimit = () =>
-      document.title.includes('OpenCode limit hit') ||
-      (document.body?.innerText || '').includes('OpenCode free limit hit');
-    const check = () => { if (looksLikeLimit()) switchNow('limit banner/title'); };
-    new MutationObserver(check).observe(document.documentElement, { subtree: true, childList: true, characterData: true });
-    setInterval(check, 3000);
-    sayBadge('🔔 limit auto-switch: watching');
+    // Phase 1: idle - the postMessage listener above does the work.
+    sayBadge(AUTO_ON_LIMIT ? '🔔 limit auto-switch: watching' : '🔔 limit auto-switch: manual only (badge click or __ocAutoSwitch.now())');
   }
 
   window.__ocAutoSwitch = {
