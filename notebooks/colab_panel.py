@@ -666,7 +666,8 @@ def notify_limit_hit(source, detail='', test=False):
     # (script not installed) -> banner only, runtime left untouched.
     try:
         _colab_js("(()=>{window.__ocAck=false; if(!window.__ocAckListener){window.__ocAckListener=true;"
-                  " window.addEventListener('message', function(e){ if(e.data && e.data.type==='oc-limit-ack') window.__ocAck=true; });}"
+                  " window.addEventListener('message', function(e){ if(e.data && e.data.type==='oc-limit-ack'){ window.__ocAck=true;"
+                  " try{ google.colab.kernel.invokeFunction('oc.limitAck', [], {}); }catch(err){} } });}"
                   " return 'listening';})()")
         payload = json.dumps({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source, 'test': bool(test)})
         _colab_js("(()=>{try{window.top.postMessage(" + payload +
@@ -677,32 +678,56 @@ def notify_limit_hit(source, detail='', test=False):
     return True
 
 
-_UNASSIGN_PENDING = {'on': False}
+_UNASSIGN_PENDING = {'on': False, 'thread': None}
+_ACK_STATE = {'event': None}
+
+
+def _on_limit_ack():
+    """Called from the output frame's JS via invokeFunction on ack."""
+    ev = _ACK_STATE.get('event')
+    if ev is not None:
+        ev.set()
+
+
+try:  # kernel callback the frame JS can invoke - no eval_js polling
+    from google.colab import output as _colab_output
+    _colab_output.register_callback('oc.limitAck', _on_limit_ack)
+except Exception:
+    pass
 
 
 def _schedule_unassign_on_ack():
     """On Tampermonkey's ack, delete THIS runtime via runtime.unassign().
 
     The kernel knows its own assignment, so this replaces the page-side
-    guesswork of picking which assignment to delete via the API. Runs in
-    a daemon thread: notify_limit_hit is often called from the log
-    watcher thread already, and unassign kills this kernel at the end.
+    guesswork of picking which assignment to delete via the API. The ack
+    arrives via the registered 'oc.limitAck' kernel callback (the frame
+    JS calls invokeFunction when it sees the ack message); a few eval_js
+    polls of window.__ocAck are kept only as a fallback. Runs in a
+    daemon thread: notify_limit_hit is often called from the log watcher
+    thread already, and unassign kills this kernel at the end.
     """
-    if _UNASSIGN_PENDING['on']:
+    prev = _UNASSIGN_PENDING.get('thread')
+    if prev is not None and prev.is_alive():
         return
+    _ACK_STATE['event'] = threading.Event()
     _UNASSIGN_PENDING['on'] = True
 
     def worker():
         try:
-            acked = False
-            for _ in range(20):  # poll ~10s for the ack
-                time.sleep(0.5)
-                value, err, _to = _colab_js("window.__ocAck ? 'yes' : 'no'")
-                if value == 'yes' and not err:
-                    acked = True
-                    break
+            ev = _ACK_STATE.get('event')
+            acked = bool(ev is not None and ev.wait(10))
+            if not acked:  # fallback: the JS flag, if invokeFunction failed
+                for _ in range(3):
+                    value, err, _to = _colab_js("window.__ocAck ? 'yes' : 'no'")
+                    if value == 'yes' and not err:
+                        acked = True
+                        break
+                    time.sleep(0.5)
             if not acked:
                 return  # no auto-switch script listening - leave runtime alone
+            say('✅ Auto-switch acknowledged — unassigning this runtime now. '
+                'The page will reconnect to a fresh session by itself.')
             time.sleep(1.0)  # let the page set its reload flag first
             from google.colab import runtime
             runtime.unassign()
@@ -711,7 +736,9 @@ def _schedule_unassign_on_ack():
         finally:
             _UNASSIGN_PENDING['on'] = False
 
-    threading.Thread(target=worker, daemon=True).start()
+    t = threading.Thread(target=worker, daemon=True)
+    _UNASSIGN_PENDING['thread'] = t
+    t.start()
 
 
 def clear_limit_hit(source):
