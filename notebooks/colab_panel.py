@@ -59,7 +59,11 @@ def fetch_file(path, dst):
 out = widgets.Output(layout=widgets.Layout(max_height='300px', overflow_y='auto',
                                            border='1px solid #ccc', padding='6px'))
 result_out = widgets.Output()
-notify_out = widgets.Output()
+# HTML, not Output: the limit watcher runs on a background thread, and an
+# Output widget cannot capture display() from another thread (it silently
+# produced an empty banner). Setting an HTML widget's value is a trait
+# change, which syncs to the page from any thread - same as status below.
+notify_out = widgets.HTML(value='')
 status = widgets.Label('Status: nothing running yet — begin with Step 1.')
 name_label = widgets.Label(
     value='Fixed address name: ' + (_secret('ZROK_NAME') or
@@ -641,30 +645,19 @@ def notify_limit_hit(source, detail=''):
         return False
     STATE['limit_hit'] = True
     when = time.strftime('%H:%M:%S')
-    with notify_out:
-        clear_output()
-        display(HTML(
-            '<div style="border:3px solid #b3261e;background:#fce8e6;color:#601410;'
-            'padding:14px;border-radius:8px;font-size:16px">'
-            '🚨 <b>OpenCode free limit hit</b> (' + when + ', via ' + source + ')<br>'
-            'This session\'s free allowance is used up, so requests now fail with 429.<br>'
-            '<b>What to do:</b> menu <b>Runtime → Restart session</b> — the panel runs '
-            'again on startup and your zrok address stays the same.</div>'))
+    notify_out.value = (
+        '<div style="border:3px solid #b3261e;background:#fce8e6;color:#601410;'
+        'padding:14px;border-radius:8px;font-size:16px">'
+        '🚨 <b>OpenCode free limit hit</b> (' + when + ', via ' + source + ')<br>'
+        'This session\'s free allowance is used up, so requests now fail with 429.<br>'
+        '<b>What to do:</b> menu <b>Runtime → Restart session</b> — the panel runs '
+        'again on startup and your zrok address stays the same.</div>')
     set_status('🚨 OpenCode free limit hit at ' + when + ' — restart the session (Runtime → Restart session).')
     say('🚨 OpenCode free limit hit (' + when + ', via ' + source + '). ' + QUOTA_HINT)
-    try:  # browser tab alert: title flash + Notification + short beep
-        _colab_js(
-            "(()=>{document.title='🚨 OpenCode limit hit — restart Colab';"
-            "try{if(window.Notification){if(Notification.permission==='granted')"
-            "{new Notification('OpenCode free limit hit',{body:'Free allowance used up. "
-            "Restart the Colab session.'});}else if(Notification.permission!=='denied')"
-            "{Notification.requestPermission();}}}catch(e){}"
-            "try{var ac=new (window.AudioContext||window.webkitAudioContext)();"
-            "var o=ac.createOscillator(),g=ac.createGain();o.connect(g);g.connect(ac.destination);"
-            "g.gain.value=0.08;o.frequency.value=880;o.start();o.stop(ac.currentTime+0.4);}catch(e){}"
-            "return document.title;})()")
-    except Exception:
-        pass
+    # No title/Notification attempt here: google.colab eval_js runs in the
+    # cell-output iframe, so document.title there is not the Colab tab.
+    # The banner text above is the signal the Tampermonkey auto-switch
+    # watches for in the main page DOM.
     return True
 
 
@@ -672,8 +665,7 @@ def clear_limit_hit(source):
     if not STATE.get('limit_hit'):
         return
     STATE['limit_hit'] = False
-    with notify_out:
-        clear_output()
+    notify_out.value = ''
     say('✅ Limit alert cleared (' + source + ') — requests are working again.')
 
 
