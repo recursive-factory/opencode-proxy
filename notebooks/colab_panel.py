@@ -10,6 +10,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import urllib.request
 
@@ -24,7 +25,8 @@ FILES = ['src/fingerprint.ts', 'src/hit-model.ts', 'src/proxy.ts',
 MODELS = ['big-pickle', 'beam-free', 'deepseek-v4.1-flash-free', 'flint-40b-free',
           'glm-5.3-flash-free', 'mimo-v2.6-flash-free', 'nemotron-3.5-lightning-free',
           'nemotron-3.5-super-vl-free']
-STATE = {'proxy': None, 'tunnel': None, 'url': None, 'dump': False, 'opencode': False}
+STATE = {'proxy': None, 'tunnel': None, 'url': None, 'dump': False, 'opencode': False,
+         'limit_hit': False, 'limit_watcher': False, 'last_bun_output': ''}
 DUMP_FILE = ROOT + '/.proxy-dump.jsonl'
 QUOTA_HINT = ('If you see "429" or "quota", this session\'s free allowance is used up. '
               'Fix: menu Runtime → Restart session. The panel cell is set to run '
@@ -57,6 +59,7 @@ def fetch_file(path, dst):
 out = widgets.Output(layout=widgets.Layout(max_height='300px', overflow_y='auto',
                                            border='1px solid #ccc', padding='6px'))
 result_out = widgets.Output()
+notify_out = widgets.Output()
 status = widgets.Label('Status: nothing running yet — begin with Step 1.')
 name_label = widgets.Label(
     value='Fixed address name: ' + (_secret('ZROK_NAME') or
@@ -90,6 +93,7 @@ def sh(args, **kw):
 
 def bun(args):
     p = sh(args, cwd=ROOT, env=env(), timeout=600)
+    STATE['last_bun_output'] = (p.stdout or '') + (p.stderr or '')
     say(p.stdout[-2500:])
     if p.returncode != 0:
         say('(technical details: ' + p.stderr[-500:] + ')')
@@ -327,11 +331,14 @@ def do_tests(_=None):
             proc.terminate()
         say('✅ All 4 tests passed. Next: Step 3 — start your public address.')
         set_status('Step 2 done, all tests passed — next: Step 3 (Start public address).')
+        clear_limit_hit('tests passed')
         return True
     except Exception as e:
         say('❌ A test failed: ' + str(e))
         say('What to do: ' + QUOTA_HINT)
         set_status('Step 2 failed — see the Log at the bottom for what to do.')
+        if _looks_like_limit(str(e) + ' ' + STATE.get('last_bun_output', '')):
+            notify_limit_hit('Run tests', str(e))
         return False
 
 
@@ -431,6 +438,8 @@ def do_start(_=None):
         say('❌ Start failed: ' + str(e))
         say('What to do: press Start again. ' + QUOTA_HINT)
         set_status('Step 3 failed — see the Log at the bottom for what to do.')
+        if _looks_like_limit(str(e)):
+            notify_limit_hit('Start public address', str(e))
         return False
 
 
@@ -476,9 +485,12 @@ def do_ask(_=None):
         resp = json.loads(urllib.request.urlopen(req, timeout=180).read().decode())
         say('🤖 ' + model_dd.value + ' replied: ' +
             str(resp['choices'][0]['message'].get('content')))
+        clear_limit_hit('a request succeeded')
     except Exception as e:
         say('❌ That question did not work: ' + str(e))
         say('What to do: ' + QUOTA_HINT)
+        if _looks_like_limit(str(e)):
+            notify_limit_hit('Ask box', str(e))
 
 
 # --------------------------------------------------------------------- panel
@@ -610,6 +622,93 @@ def _remember_opencode_mode(on):
     return value == flag and not err and not timed_out
 
 
+# ------------------------------------------------------- limit notification
+def _looks_like_limit(text):
+    t = (text or '').lower()
+    return '429' in t or 'freeusagelimit' in t or 'quota' in t or 'rate limit' in t
+
+
+def notify_limit_hit(source, detail=''):
+    """Show the limit alert in Colab - once per episode, until a request works.
+
+    Fires from the log watcher (requests from Cursor etc. never touch the
+    panel buttons) and from the panel's own test/ask/start failures.
+    """
+    if STATE.get('limit_hit'):
+        return False
+    STATE['limit_hit'] = True
+    when = time.strftime('%H:%M:%S')
+    with notify_out:
+        clear_output()
+        display(HTML(
+            '<div style="border:3px solid #b3261e;background:#fce8e6;color:#601410;'
+            'padding:14px;border-radius:8px;font-size:16px">'
+            '🚨 <b>OpenCode free limit hit</b> (' + when + ', via ' + source + ')<br>'
+            'This session\'s free allowance is used up, so requests now fail with 429.<br>'
+            '<b>What to do:</b> menu <b>Runtime → Restart session</b> — the panel runs '
+            'again on startup and your zrok address stays the same.</div>'))
+    set_status('🚨 OpenCode free limit hit at ' + when + ' — restart the session (Runtime → Restart session).')
+    say('🚨 OpenCode free limit hit (' + when + ', via ' + source + '). ' + QUOTA_HINT)
+    try:  # browser tab alert: title flash + Notification + short beep
+        _colab_js(
+            "(()=>{document.title='🚨 OpenCode limit hit — restart Colab';"
+            "try{if(window.Notification){if(Notification.permission==='granted')"
+            "{new Notification('OpenCode free limit hit',{body:'Free allowance used up. "
+            "Restart the Colab session.'});}else if(Notification.permission!=='denied')"
+            "{Notification.requestPermission();}}}catch(e){}"
+            "try{var ac=new (window.AudioContext||window.webkitAudioContext)();"
+            "var o=ac.createOscillator(),g=ac.createGain();o.connect(g);g.connect(ac.destination);"
+            "g.gain.value=0.08;o.frequency.value=880;o.start();o.stop(ac.currentTime+0.4);}catch(e){}"
+            "return document.title;})()")
+    except Exception:
+        pass
+    return True
+
+
+def clear_limit_hit(source):
+    if not STATE.get('limit_hit'):
+        return
+    STATE['limit_hit'] = False
+    with notify_out:
+        clear_output()
+    say('✅ Limit alert cleared (' + source + ') — requests are working again.')
+
+
+def _watch_proxy_log():
+    """Tail /tmp/proxy.log: '✗ … -> upstream 429' = limit, '✓ …' = recovered.
+
+    The proxy (started by this panel) writes that log; external apps using
+    the public address show up there even though they never click a button.
+    """
+    path, offset = '/tmp/proxy.log', 0
+    while True:
+        try:
+            if os.path.exists(path):
+                if os.path.getsize(path) < offset:  # proxy restarted, log truncated
+                    offset = 0
+                with open(path, errors='replace') as fh:
+                    fh.seek(offset)
+                    lines = fh.readlines()
+                    offset = fh.tell()
+                for line in lines:
+                    # Only a final upstream 429 counts - the minimal->full
+                    # retry line ('↺ … 429') may still succeed.
+                    if 'upstream 429' in line or 'freeusagelimit' in line.lower():
+                        notify_limit_hit('proxy log', line.strip())
+                    elif line.startswith('✓'):
+                        clear_limit_hit('proxy log')
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+def start_limit_watcher():
+    if STATE.get('limit_watcher'):
+        return
+    STATE['limit_watcher'] = True
+    threading.Thread(target=_watch_proxy_log, daemon=True).start()
+
+
 def _paint_opencode_button(on):
     _RESTORING['on'] = True
     try:
@@ -645,6 +744,7 @@ def section(title, children):
 
 panel = widgets.VBox([
     widgets.HTML('<h3 style="margin:4px 0">🎛️ Control panel</h3>'),
+    notify_out,
     all_btn,
     widgets.Label('…or work through the steps one by one below:'),
     section('Step 1 · Get ready', [
@@ -679,4 +779,7 @@ panel = widgets.VBox([
 display(panel)
 say('👋 Session connected. Starting setup, tests, and your public address — no buttons to press.')
 restore_opencode_mode()
+start_limit_watcher()
+say('🔔 Limit watcher on: if the OpenCode free limit is hit, a red banner, a '
+    'browser notification, and a beep will appear here.')
 do_all()
