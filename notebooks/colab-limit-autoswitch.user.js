@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         OpenCode Colab - Limit Auto-Switch
 // @namespace    opencode-proxy
-// @version      3.2.0
-// @description  On the panel's limit signal, acknowledge it (the panel then unassigns). Reload only after that session has stopped, so Colab does not ask to continue a running cell. Then press Ctrl+F9. Stop when the new panel posts oc-panel-started.
+// @version      3.3.0
+// @description  On the limit signal, wait until the session has stopped, reload without the "changes may not be saved" prompt, then press Ctrl+F9. Stop when the new cell posts oc-panel-started.
 // @match        https://colab.research.google.com/*
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/recursive-factory/opencode-proxy/main/notebooks/colab-limit-autoswitch.user.js
 // @downloadURL  https://raw.githubusercontent.com/recursive-factory/opencode-proxy/main/notebooks/colab-limit-autoswitch.user.js
@@ -24,6 +24,30 @@
   const RETRY_MS = 15000;        // press Ctrl+F9 again if the panel has not started
   const START_TIMEOUT_MS = 300000;
   const FLAG = 'oc-switch-reload';
+  let suppressLeave = false;
+
+  // Colab registers beforeunload both as a property and as a listener.
+  // Clearing the property at reload time is too late. Wrap both paths now,
+  // and only silence them for the reload this script triggers.
+  const nativeAdd = EventTarget.prototype.addEventListener;
+  EventTarget.prototype.addEventListener = function (type, listener, options) {
+    if (type !== 'beforeunload') return nativeAdd.call(this, type, listener, options);
+    return nativeAdd.call(this, type, function (event) {
+      if (suppressLeave) return;
+      return listener.apply(this, arguments);
+    }, options);
+  };
+  let pageLeaveHandler = null;
+  Object.defineProperty(window, 'onbeforeunload', {
+    configurable: true,
+    enumerable: true,
+    get() { return suppressLeave ? null : pageLeaveHandler; },
+    set(fn) { pageLeaveHandler = fn; },
+  });
+  nativeAdd.call(window, 'beforeunload', (event) => {
+    if (!suppressLeave) return;
+    event.stopImmediatePropagation();
+  }, true);
 
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -71,7 +95,7 @@
       sayBadge('⏳ session ending (' + (label || 'waiting') + ') — reload after it stops…');
       await sleep(500);
     }
-    window.onbeforeunload = null;
+    suppressLeave = true;
     sayBadge('🔄 session stopped - reloading…');
     location.reload();
   }
