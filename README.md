@@ -89,18 +89,9 @@ Free quota is **per IP address** — when your home IP is used up, run the same 
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/recursive-factory/opencode-proxy/blob/main/notebooks/opencode-colab.ipynb)
 
-The notebook is a button-driven control panel for non-coders:
+The notebook is a control panel for non-coders. The panel cell is marked **Run on startup** (`metadata.colab.autoexec.startup`), so when the Colab session connects that cell runs by itself and does setup, the tests, and the public address. The same steps are still on the panel if you need to run them again (**🚀 One-click**, or **1 · Setup** → **2 · Run tests** → **3 · Start public address**). Copy the address from the green box into your app (API key: `not-needed`).
 
-1. Run the panel cell (▶)
-2. Press the big **🚀 One-click: do everything for me** button — it runs setup, the tests, and startup in order (or click **1 · Setup** → **2 · Run tests** → **3 · Start public address** one by one)
-3. Copy the address from the green box into your app (API key: `not-needed`)
-
-Two tunnel choices in Step 3:
-
-| Tunnel | Address | Needs |
-|---|---|---|
-| **zrok** (recommended) | The same `https://<name>.shares.zrok.io` every time | A free zrok.io account; two Colab secrets (below) |
-| **Cloudflare** | A new random `*.trycloudflare.com` each session | Nothing |
+Step 3 exposes the proxy via **zrok**: the same `https://<name>.shares.zrok.io` address every time. It needs a free zrok.io account and two Colab secrets (below).
 
 Colab secrets (🔑 in the left sidebar → **Secrets**, notebook access on):
 
@@ -112,7 +103,7 @@ Colab secrets (🔑 in the left sidebar → **Secrets**, notebook access on):
 
 The notebook works whether this repo is public or private — with a private repo, the Open in Colab button will ask you to sign in to GitHub, and the panel downloads code using `OC_PROXY_GITHUB_REPO_TOKEN`. Without that secret, a private repo returns "404" and Setup fails.
 
-**Quota used up?** The tunnel points at one Colab runtime, so a dead runtime = dead address. Menu **Runtime → Restart session**, run the panel, click 1 → 2 → 3 again. The zrok address stays the same (the panel reclaims the name from the old session automatically); client configs never change.
+**Quota used up?** The tunnel points at one Colab runtime, so a dead runtime = dead address. Menu **Runtime → Restart session** — the panel cell runs again on connect and brings the address back. The zrok address stays the same (the panel reclaims the name from the old session automatically); client configs never change.
 
 ---
 
@@ -136,7 +127,7 @@ Environment variables for the proxy:
 |---|---|
 | `PORT` / `HOST` | Listen address (default `8787` / `127.0.0.1`) |
 | `PROXY_API_KEY` | If set, clients must send `Authorization: Bearer <value>` |
-| `PROXY_SYSTEM` | `minimal` (default: client system + ~60-char gate stub) or `full` (legacy 13k OpenCode prepend). Minimal mode auto-retries once with the full prompt on a 429 |
+| `PROXY_SYSTEM` | `minimal` (default: client system + ~60-char gate stub), `full` (legacy 13k OpenCode prepend; minimal mode auto-retries once with the full prompt on a 429), or `opencode` (forward the JSON body unchanged — for when the client is OpenCode, which already sends a gate-valid prompt and a `read` tool). Identity headers are still added in every mode |
 | `PROXY_WORKDIR` | Working-directory path written into the gate stub (default: the proxy's cwd) |
 | `PROXY_DUMP=1` | Dump each request/response pair to `.proxy-dump.jsonl` (contains full prompts — delete after debugging). In Colab, use the panel's **🔍 Request inspector** section instead (Enable dump → send one request → Show breakdown → Turn off & clear); `PROXY_DUMP_FILE` overrides the dump path |
 | `OPENCODE_API_KEY` | Use instead of the anonymous `Bearer public` lane (paid/Go) |
@@ -176,7 +167,7 @@ It will, eventually — upstream rotates the gate. Start with [AGENT.md](AGENT.m
 
 This repository is an **experiment** shared for research, learning, and personal interoperability testing only.
 
-- It is **not affiliated with, endorsed by, or supported by** Anomaly Innovations, OpenCode, zrok, or Cloudflare. All product names belong to their respective owners.
+- It is **not affiliated with, endorsed by, or supported by** Anomaly Innovations, OpenCode, or zrok. All product names belong to their respective owners.
 - OpenCode's free models are offered for use through OpenCode's own client. Accessing them through other clients may conflict with OpenCode's terms of service — **you are responsible for how you use this code**, and for complying with the terms of any service you connect to it.
 - There is no guarantee this works today or tomorrow: the upstream behaviour it relies on is undocumented and can change or be blocked at any time.
 - Provided **as-is, without warranty of any kind**. Don't use it for production, commercial, or redistributed offerings — if you need these models seriously, use OpenCode's supported paid options.

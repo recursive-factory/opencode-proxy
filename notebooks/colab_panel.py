@@ -24,10 +24,11 @@ FILES = ['src/fingerprint.ts', 'src/hit-model.ts', 'src/proxy.ts',
 MODELS = ['big-pickle', 'beam-free', 'deepseek-v4.1-flash-free', 'flint-40b-free',
           'glm-5.3-flash-free', 'mimo-v2.6-flash-free', 'nemotron-3.5-lightning-free',
           'nemotron-3.5-super-vl-free']
-STATE = {'proxy': None, 'tunnel': None, 'url': None, 'dump': False}
+STATE = {'proxy': None, 'tunnel': None, 'url': None, 'dump': False, 'opencode': False}
 DUMP_FILE = ROOT + '/.proxy-dump.jsonl'
 QUOTA_HINT = ('If you see "429" or "quota", this session\'s free allowance is used up. '
-              'Fix: menu Runtime → Restart session, then run the panel cell again.')
+              'Fix: menu Runtime → Restart session. The panel cell is set to run '
+              'on startup, so setup starts again by itself.')
 
 
 def _secret(key):
@@ -62,10 +63,6 @@ name_label = widgets.Label(
           '⚠️ not set — add ZROK_NAME in Secrets (🔑 left sidebar)'))
 token_pw = widgets.Password(description='zrok token:', placeholder='paste only if not saved in Secrets',
                             layout=widgets.Layout(width='340px'))
-tunnel_choice = widgets.RadioButtons(
-    options=[('zrok — the same address every time (recommended)', 'zrok'),
-             ('Cloudflare — a new address each time, no account needed', 'cloudflare')],
-    value='zrok', description='', layout=widgets.Layout(width='auto'))
 model_dd = widgets.Dropdown(options=MODELS, value='big-pickle', description='Model:')
 prompt_text = widgets.Text(value='Say hi in exactly five words.', description='Question:',
                            layout=widgets.Layout(width='420px'))
@@ -112,6 +109,8 @@ def proxy_env(dump=None):
     if STATE.get('dump') if dump is None else dump:
         e['PROXY_DUMP'] = '1'
         e['PROXY_DUMP_FILE'] = DUMP_FILE
+    if STATE.get('opencode'):
+        e['PROXY_SYSTEM'] = 'opencode'
     return e
 
 
@@ -135,7 +134,7 @@ def ensure_proxy():
 # ------------------------------------------------------- request inspector
 def restart_proxy(dump):
     """Restart ONLY the proxy (the tunnel keeps pointing at 127.0.0.1:8787,
-    so a zrok/Cloudflare address stays the same)."""
+    so the zrok address stays the same)."""
     p = STATE.get('proxy')
     if p:
         p.terminate()
@@ -210,9 +209,13 @@ def do_breakdown(_=None):
                          or t.get('name') or '?') for t in tools), reverse=True)
         t_chars = sum(s for s, _ in sized)
         total = u_sys + other + t_chars
-        say(f'Request {i}: model={up.get("model")}  ≈{total // 4:,} prompt tokens total')
-        say(f'  • our gate stub        : {max(0, u_sys - c_sys):>8,} chars  ≈{max(0, u_sys - c_sys) // 4:,} tok')
-        say(f'  • your app system text : {c_sys:>8,} chars  ≈{c_sys // 4:,} tok')
+        mode = rec.get('sysMode') or 'minimal'
+        say(f'Request {i}: model={up.get("model")}  mode={mode}  ≈{total // 4:,} prompt tokens total')
+        if mode == 'opencode':
+            say(f'  • system text (forwarded as received): {c_sys:>8,} chars  ≈{c_sys // 4:,} tok')
+        else:
+            say(f'  • our gate stub        : {max(0, u_sys - c_sys):>8,} chars  ≈{max(0, u_sys - c_sys) // 4:,} tok')
+            say(f'  • your app system text : {c_sys:>8,} chars  ≈{c_sys // 4:,} tok')
         say(f'  • messages / history   : {other:>8,} chars  ≈{other // 4:,} tok  ({len(umsgs)} msgs)')
         say(f'  • tool definitions     : {t_chars:>8,} chars  ≈{t_chars // 4:,} tok  ({len(tools)} tools)')
         if sized:
@@ -296,7 +299,7 @@ def do_tests(_=None):
         if healthy():
             say('✅ The proxy is already running, so we test the live one.')
         else:
-            proc = subprocess.Popen(['bun', 'run', 'proxy.ts'], cwd=ROOT, env=env(),
+            proc = subprocess.Popen(['bun', 'run', 'proxy.ts'], cwd=ROOT, env=proxy_env(),
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True)
             started_here = True
@@ -307,13 +310,19 @@ def do_tests(_=None):
         models = json.loads(urllib.request.urlopen(BASE + '/v1/models', timeout=10)
                             .read().decode())
         say('✅ The proxy answered with ' + str(len(models.get('data', []))) + ' models.')
-        req = urllib.request.Request(
-            BASE + '/v1/chat/completions',
-            data=json.dumps({'model': 'big-pickle', 'messages': [
-                {'role': 'user', 'content': 'Say hi in exactly five words.'}]}).encode(),
-            headers={'Content-Type': 'application/json'})
-        chat = json.loads(urllib.request.urlopen(req, timeout=180).read().decode())
-        say('✅ The proxy replied: "' + str(chat['choices'][0]['message'].get('content')) + '"')
+        if STATE.get('opencode'):
+            health = json.loads(urllib.request.urlopen(BASE + '/health', timeout=10).read().decode())
+            if health.get('system') != 'opencode':
+                raise RuntimeError('OpenCode mode is selected, but the running proxy is still rewriting requests. Click the OpenCode mode button again.')
+            say('✅ OpenCode mode is on: this test stops at the model list. A bare question from the notebook has no system prompt; OpenCode sends that itself.')
+        else:
+            req = urllib.request.Request(
+                BASE + '/v1/chat/completions',
+                data=json.dumps({'model': 'big-pickle', 'messages': [
+                    {'role': 'user', 'content': 'Say hi in exactly five words.'}]}).encode(),
+                headers={'Content-Type': 'application/json'})
+            chat = json.loads(urllib.request.urlopen(req, timeout=180).read().decode())
+            say('✅ The proxy replied: "' + str(chat['choices'][0]['message'].get('content')) + '"')
         if started_here and proc:
             proc.terminate()
         say('✅ All 4 tests passed. Next: Step 3 — start your public address.')
@@ -335,8 +344,8 @@ def ensure_zrok():
             'v2.0.8/zrok_2.0.8_linux_amd64.tar.gz | tar -xz -C /usr/local/bin zrok2 '
             '&& chmod +x /usr/local/bin/zrok2'])
     if r.returncode != 0:
-        say('❌ zrok could not be installed. What to do: try again, or choose '
-            'Cloudflare in Step 3 instead (no account needed).')
+        say('❌ zrok could not be installed. What to do: press Start again; '
+            'if it keeps failing, restart the session (Runtime → Restart session).')
         return False
     return True
 
@@ -385,30 +394,7 @@ def start_zrok():
         m = re.search(r'[a-z0-9.-]*shares?\.zrok\.io', txt)
         if m:
             return 'https://' + m.group(0)
-    say('❌ zrok did not give an address in time. What to do: press Start again; '
-        'if it keeps failing, choose Cloudflare instead.')
-    return None
-
-
-def start_cloudflare():
-    if not os.path.exists('/usr/local/bin/cloudflared'):
-        say('⏳ Installing Cloudflare (one-time)…')
-        sh(['bash', '-c', 'curl -fsSL https://github.com/cloudflare/cloudflared/releases/'
-                          'latest/download/cloudflared-linux-amd64 -o /usr/local/bin/'
-                          'cloudflared && chmod +x /usr/local/bin/cloudflared'])
-    STATE['tunnel'] = subprocess.Popen(
-        ['cloudflared', 'tunnel', '--url', BASE, '--no-autoupdate'],
-        stdout=open('/tmp/tunnel.log', 'w'), stderr=subprocess.STDOUT)
-    for _ in range(90):
-        time.sleep(1)
-        try:
-            txt = open('/tmp/tunnel.log').read()
-        except Exception:
-            continue
-        m = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com', txt)
-        if m:
-            return m.group(0)
-    say('❌ Cloudflare did not give an address in time. What to do: press Start again.')
+    say('❌ zrok did not give an address in time. What to do: press Start again.')
     return None
 
 
@@ -432,7 +418,7 @@ def do_start(_=None):
         if not ensure_proxy():
             set_status('Step 3 stopped — the proxy would not start. See the Log.')
             return False
-        url = start_zrok() if tunnel_choice.value == 'zrok' else start_cloudflare()
+        url = start_zrok()
         if not url:
             set_status('Step 3 did not finish — see the Log at the bottom for what to do.')
             return False
@@ -477,6 +463,9 @@ def do_ask(_=None):
     try:
         if not ensure_proxy():
             say('What to do: run Step 1 (Setup) first, then ask again.')
+            return
+        if STATE.get('opencode'):
+            say('❌ The Ask box is off while OpenCode mode is on. That mode forwards the body unchanged, and this box sends only a question — upstream rejects it without OpenCode\'s system prompt. Turn OpenCode mode off to ask from here, or send the question from OpenCode.')
             return
         say('⏳ Asking ' + model_dd.value + '…')
         req = urllib.request.Request(
@@ -524,15 +513,124 @@ breakdown_btn.on_click(do_breakdown)
 download_btn.on_click(do_download_dump)
 dump_off_btn.on_click(do_dump_off)
 
+opencode_btn = widgets.ToggleButton(
+    value=False,
+    description='OpenCode mode: OFF',
+    button_style='',
+    tooltip='Forward each request body to the API unchanged. Turn on when the client is OpenCode.',
+    layout=widgets.Layout(width='220px'),
+)
+
+
+def do_opencode_mode(btn):
+    if _RESTORING['on']:
+        return
+    STATE['opencode'] = bool(btn.value)
+    remembered = _remember_opencode_mode(btn.value)
+    if btn.value:
+        btn.description = 'OpenCode mode: ON'
+        btn.button_style = 'success'
+        say('✅ OpenCode mode ON. The request body is sent upstream exactly as OpenCode sent it — system text, tools, and sampling fields stay untouched.')
+        say('The proxy still adds the identity headers the API requires (User-Agent and session id). The Ask box in this notebook stays off until you turn this mode off.')
+    else:
+        btn.description = 'OpenCode mode: OFF'
+        btn.button_style = ''
+        say('✅ OpenCode mode OFF. Cursor, VS Code, and the Ask box get the small gate stub again, and a read-like tool is renamed when the client has none named read.')
+    if remembered:
+        say('Saved in this browser. After Runtime → Restart session, startup turns OpenCode mode '
+            + ('on' if btn.value else 'off') + ' again by itself.')
+    else:
+        say('⚠️ This browser did not store the choice. After a session restart, OpenCode mode starts off until you turn it on again.')
+    if not os.path.exists(ROOT):
+        say('It applies when the proxy starts (Step 1, then Step 3).')
+        return
+    if healthy() or STATE.get('proxy'):
+        say('⏳ Restarting the proxy so the mode applies. Your public address stays the same.')
+        if restart_proxy(STATE.get('dump', False)):
+            say('✅ Proxy restarted in ' + ('OpenCode' if STATE['opencode'] else 'app') + ' mode.')
+            set_status(('OpenCode mode on — body forwarded as received.' if STATE['opencode']
+                        else 'OpenCode mode off — gate stub on for other apps.') +
+                       (' Recording requests.' if STATE.get('dump') else ''))
+        else:
+            say('❌ The proxy did not restart. What to do: press "3 · Start public address".')
+    else:
+        say('It applies the next time the proxy starts.')
+
+
+opencode_btn.on_click(do_opencode_mode)
+
+# The Colab VM disk is wiped on disconnect. The choice lives in this browser
+# (localStorage) so the startup cell can turn OpenCode mode back on before
+# the proxy launches. A different browser, or cleared site data, starts off.
+_MODE_JS_KEY = 'opencode-proxy-mode'
+_RESTORING = {'on': False}
+
+
+def _colab_js(script, timeout=8):
+    """Run script in this notebook's page. (value, error, timed_out).
+
+    A missing reply (timeout) is not the same as a stored empty value: the
+    script is wrapped so a real answer is always an object.
+    """
+    try:
+        from google.colab import output
+    except Exception as e:
+        return None, e, False
+    wrapped = (
+        "(function(){try{return {ok:true, v:(%s)};}"
+        "catch(e){return {ok:false, err:String(e)};}})()"
+    ) % script
+    try:
+        try:
+            result = output.eval_js(wrapped, timeout_sec=timeout)
+        except TypeError:
+            result = output.eval_js(wrapped)
+    except Exception as e:
+        timed_out = isinstance(e, TimeoutError) or 'timeout' in str(e).lower()
+        return None, e, timed_out
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except Exception:
+            pass
+    if not isinstance(result, dict) or 'ok' not in result:
+        return None, TimeoutError('the page did not answer'), True
+    if result.get('ok'):
+        return result.get('v'), None, False
+    return None, RuntimeError(str(result.get('err') or 'the page rejected the save')), False
+
+
+def _remember_opencode_mode(on):
+    flag = 'on' if on else 'off'
+    value, err, timed_out = _colab_js(
+        "localStorage.setItem('" + _MODE_JS_KEY + "', '" + flag + "'); '" + flag + "'")
+    return value == flag and not err and not timed_out
+
+
+def _paint_opencode_button(on):
+    _RESTORING['on'] = True
+    try:
+        opencode_btn.value = on
+        opencode_btn.description = 'OpenCode mode: ON' if on else 'OpenCode mode: OFF'
+        opencode_btn.button_style = 'success' if on else ''
+        STATE['opencode'] = on
+    finally:
+        _RESTORING['on'] = False
+
+
+def restore_opencode_mode():
+    """Apply the browser's saved OpenCode mode before autorun starts the proxy."""
+    saved, err, timed_out = _colab_js("localStorage.getItem('" + _MODE_JS_KEY + "')")
+    if timed_out or err:
+        say('⚠️ Could not read the saved OpenCode mode from this browser, so this session starts with it off.')
+        return
+    if saved == 'on':
+        _paint_opencode_button(True)
+        say('✅ OpenCode mode restored from this browser. Startup will forward request bodies unchanged.')
+    elif saved == 'off':
+        _paint_opencode_button(False)
+
 zrok_fields = widgets.VBox([name_label, token_pw])
-
-
-def _on_tunnel_change(change):
-    # The name/token boxes only matter for zrok - hide them for Cloudflare.
-    zrok_fields.layout.display = '' if change['new'] == 'zrok' else 'none'
-
-
-tunnel_choice.observe(_on_tunnel_change, names='value')
 
 
 def section(title, children):
@@ -553,12 +651,16 @@ panel = widgets.VBox([
         test_btn,
         widgets.Label('Runs 4 quick tests. Uses a tiny bit of this session\'s free allowance.')]),
     section('Step 3 · Your public address', [
-        widgets.HTML('<b>Choose how people will reach it:</b>'),
-        tunnel_choice,
+        widgets.HTML('<b>Your fixed zrok address</b> — the same address every time:'),
         zrok_fields,
         widgets.HBox([start_btn, stop_btn]),
         status,
-        result_out]),
+        result_out,
+        opencode_btn,
+        widgets.Label('OpenCode mode: turn this ON only when OpenCode itself is the client. '
+                      'The body you send is the body posted to the API. Leave it OFF for '
+                      'Cursor, VS Code, pi.dev, and the Ask box below. '
+                      'This choice is remembered in this browser, so a new session starts in the same mode.')]),
     section('💬 Try the models', [
         widgets.HBox([model_dd, prompt_text, ask_btn]),
         widgets.Label('A quick chat, right here in the notebook. Works once the proxy is running.')]),
@@ -572,4 +674,6 @@ panel = widgets.VBox([
     section('📜 Log', [out]),
 ])
 display(panel)
-say('👋 Panel ready. Click "1 · Setup" to begin.')
+say('👋 Session connected. Starting setup, tests, and your public address — no buttons to press.')
+restore_opencode_mode()
+do_all()

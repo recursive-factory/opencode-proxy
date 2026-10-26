@@ -18,6 +18,10 @@
  *      PROXY_SYSTEM=full restores the legacy 13k OpenCode prepend; on a
  *      429 in minimal mode the proxy retries once with the full prompt
  *      and stays in full mode for 1h (gate-rotation self-heal).
+ *      PROXY_SYSTEM=opencode skips every body rewrite: the JSON we receive
+ *      is the JSON we POST upstream. Use it when the client is OpenCode
+ *      itself — that client already sends a gate-valid system prompt and
+ *      a tool named `read`. Identity headers are still applied (see 3).
  *   2. Tools: upstream requires a tool literally named `read` (verified:
  *      `edit`/`bash`/fake names alone -> 429; any `read` definition -> 200).
  *      The proxy adds NO toolset of its own — if the client has no `read`,
@@ -25,9 +29,11 @@
  *      upstream and its tool_calls renamed back downstream. Only when the
  *      client has no read-like tool (or none at all) is a stub `read`
  *      appended, with any calls to it suppressed (client can't run it).
+ *      Skipped entirely in opencode mode.
  *   3. Identity/transport: Bun.serve + Bun fetch (Node fetch -> 429 on
  *      byte-identical replays), fresh descending ses_ per request,
  *      latest-CLI User-Agent. See fingerprint.ts for the full evidence.
+ *      These headers are added in every mode, including opencode.
  * Client auth is ignored unless PROXY_API_KEY is set (then Bearer must match).
  */
 import { appendFile } from "node:fs/promises";
@@ -35,11 +41,19 @@ import { BASE, FALLBACK_FREE, SYSTEM_TEMPLATE, buildMinimalSystem, buildSystemPr
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "127.0.0.1";
 const PROXY_KEY = process.env.PROXY_API_KEY || "";
-/** System-prompt mode: "minimal" (env stub, default) or "full" (13k prepend). */
-const SYSTEM_MODE = (process.env.PROXY_SYSTEM || "minimal").toLowerCase() === "full" ? "full" : "minimal";
+/** Body mode: "minimal" (env stub, default), "full" (13k prepend), or "opencode" (body forwarded unchanged). */
+type SystemMode = "minimal" | "full" | "opencode";
+function systemModeFromEnv(raw = process.env.PROXY_SYSTEM): SystemMode {
+  const v = (raw || "minimal").toLowerCase();
+  if (v === "full") return "full";
+  if (v === "opencode" || v === "passthrough") return "opencode";
+  return "minimal";
+}
+const SYSTEM_MODE = systemModeFromEnv();
 /** After a minimal-mode 429 fallback, stay in full mode until this time. */
 let fullModeUntil = 0;
-const effectiveSystemMode = (): "minimal" | "full" => (SYSTEM_MODE === "full" || Date.now() < fullModeUntil ? "full" : "minimal");
+const effectiveSystemMode = (): SystemMode =>
+  SYSTEM_MODE === "opencode" ? "opencode" : SYSTEM_MODE === "full" || Date.now() < fullModeUntil ? "full" : "minimal";
 if (!(await Bun.file(SYSTEM_TEMPLATE).exists())) console.error("WARN: opencode-system.txt missing — upstream will likely 429 every request");
 
 // ------------------------------------------------------------- transform ---
@@ -49,7 +63,17 @@ const setToolName = (t: any, name: string) => { if (t?.function) t.function.name
 const textOf = (content: any): string =>
   typeof content === "string" ? content : Array.isArray(content) ? content.map((p) => p?.text || "").join("") : "";
 
-async function transformRequest(client: AnyObj, mode: "minimal" | "full" = effectiveSystemMode()) {
+/** OpenCode-as-client: keep every message, tool, and sampling field. Only the
+ *  model id loses a leading `opencode/` so the free-model check matches upstream. */
+function passthroughBody(client: AnyObj) {
+  const body = structuredClone(client);
+  const model = String(body.model || "big-pickle").replace(/^opencode\//, "");
+  body.model = model;
+  return { model, body, renameBack: new Map<string, string>(), suppress: new Set<string>() };
+}
+
+async function transformRequest(client: AnyObj, mode: SystemMode = effectiveSystemMode()) {
+  if (mode === "opencode") return passthroughBody(client);
   const model = String(client.model || "big-pickle").replace(/^opencode\//, "");
   const messages: any[] = Array.isArray(client.messages) ? client.messages : [];
   const clientSystem = messages.filter((m) => m?.role === "system").map((m) => textOf(m.content)).filter(Boolean).join("\n\n");
@@ -124,7 +148,7 @@ async function handleChat(req: Request): Promise<Response> {
   // Gate-rotation self-heal: minimal shape rejected (429) -> retry once with
   // the full prompt and stay in full mode for 1h. A genuine quota 429 fails
   // the retry too and is returned as-is (one extra call, only on failure).
-  if (upstream && upstream.status === 429 && sysMode === "minimal") {
+  if (upstream && upstream.status === 429 && sysMode === "minimal" && SYSTEM_MODE !== "opencode") {
     await upstream.text().catch(() => {});
     console.log(`↺ ${model} minimal-mode 429 — retrying with full system prompt`);
     sysMode = "full"; fullModeUntil = Date.now() + 3_600_000;
@@ -150,6 +174,15 @@ async function handleChat(req: Request): Promise<Response> {
     return new Response(await upstream.text(), { status: upstream.status, headers: { "Content-Type": "application/json" } });
   }
   console.log(`✓ ${model} client-stream=${!!client.stream} tools=${(body.tools || []).length} (${Date.now() - started}ms to first byte)`);
+
+  // OpenCode mode: the upstream bytes go back untouched. Tool-call renaming
+  // and SSE reassembly only exist for clients we rewrote.
+  if (sysMode === "opencode") {
+    const contentType = upstream.headers.get("content-type") || (client.stream ? "text/event-stream" : "application/json");
+    const headers: Record<string, string> = { "Content-Type": contentType };
+    if (client.stream) { headers["Cache-Control"] = "no-cache"; headers["Connection"] = "keep-alive"; }
+    return new Response(upstream.body, { status: upstream.status, headers });
+  }
 
   if (client.stream) {
     const reader = upstream.body.getReader(), decoder = new TextDecoder(), encoder = new TextEncoder();
@@ -214,7 +247,7 @@ Bun.serve({
     try {
       if (PROXY_KEY && req.headers.get("authorization") !== `Bearer ${PROXY_KEY}` && url.pathname !== "/health")
         return json(errBody("invalid proxy API key", "auth_error"), 401);
-      if (req.method === "GET" && url.pathname === "/health") return json({ ok: true, runtime: `bun ${Bun.version}` });
+      if (req.method === "GET" && url.pathname === "/health") return json({ ok: true, runtime: `bun ${Bun.version}`, system: SYSTEM_MODE });
       if (req.method === "GET" && (url.pathname === "/v1/models" || url.pathname === "/models")) {
         try {
           const r = await fetch(`${BASE}/v1/models`, { signal: AbortSignal.timeout(10_000) });
@@ -230,4 +263,4 @@ Bun.serve({
     }
   },
 });
-console.log(`opencode-free proxy on http://${HOST}:${PORT}/v1  (bun ${Bun.version}, models: free only)`);
+console.log(`opencode-free proxy on http://${HOST}:${PORT}/v1  (bun ${Bun.version}, models: free only, system=${SYSTEM_MODE})`);

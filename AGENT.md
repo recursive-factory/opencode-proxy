@@ -23,7 +23,7 @@ were never supposed to reach them directly:
 | `data/opencode-system.txt` | **Template** for the system prompt, captured from the real CLI on this machine/project. `fingerprint.ts:buildSystemPrompt()` substitutes the dynamic parts per request (model block, live skills, date, env) the way the CLI constructs it per session; the file supplies the stable harness wording + fallback for any region that fails to build. Re-extract after major CLI updates (§7). |
 | `data/opencode-tools.json` | The CLI's exact 12 tool definitions captured from its request. Used by `hit-model.ts`. The proxy does **not** use these (clients bring their own tools). |
 | `package.json` / `tsconfig.json` | Bun project. Scripts: `proxy`, `list`, `probe`, `all-free`, `minimize`, `typecheck`. Runtime dep: none (only `bun-types`/`typescript` devDeps). |
-| `notebooks/opencode-colab.ipynb` | **Current testbed:** the whole stack (sources embedded as checksum-verified chunks, written flat in Colab — `dataPath()` in `fingerprint.ts` resolves both layouts) + tests + Cloudflare/zrok tunnels, runnable in Google Colab. Mirrors the live Colab notebook edited via `.cursor/mcp.json` (colab-mcp). See §8. (The older `opencode serve` bridge notebooks were deleted 2026-10-25; still in git history.) |
+| `notebooks/opencode-colab.ipynb` | **Current testbed:** the whole stack (sources embedded as checksum-verified chunks, written flat in Colab — `dataPath()` in `fingerprint.ts` resolves both layouts) + tests + zrok tunnel, runnable in Google Colab. Mirrors the live Colab notebook edited via `.cursor/mcp.json` (colab-mcp). See §8. (The older `opencode serve` bridge notebooks were deleted 2026-10-25; still in git history.) |
 
 Architecture:
 
@@ -61,10 +61,9 @@ in your own terminal.
 
 The anonymous quota is per-IP (§7): when the home IP is burned, run the stack in
 Google Colab instead — `opencode-colab.ipynb` (sources embedded, sha256-verified)
-installs Bun, runs the tests, and can expose the proxy publicly two ways:
+installs Bun, runs the tests, and can expose the proxy publicly via zrok:
 
-- **Cloudflare quick tunnel** — random `*.trycloudflare.com` URL per start, keyless.
-- **zrok v2 (recommended)** — `zrok2` enabled with the token from the Colab secret
+- **zrok v2** — `zrok2` enabled with the token from the Colab secret
   `ZROK_TOKEN`; reserved name gives the fixed client URL
   `https://oc-llm-proxy.shares.zrok.io/v1` (keyless; API key = anything).
 
@@ -80,6 +79,7 @@ Configuration (environment variables):
 | `PORT` / `HOST` | proxy | Listen address (default `8787` / `127.0.0.1`). |
 | `PROXY_API_KEY` | proxy | If set, clients must send `Authorization: Bearer <value>`. |
 | `PROXY_DUMP=1` | proxy | Dump each client request + transformed upstream body to `.proxy-dump.jsonl` (sensitive; delete after). |
+| `PROXY_SYSTEM` | proxy | `minimal` (default), `full`, or `opencode`. `opencode` forwards the JSON body unchanged (client is OpenCode). The Colab panel's **OpenCode mode** button sets this and restarts the proxy. The button's on/off is stored in the browser (`localStorage` key `opencode-proxy-mode`) and restored before autorun, so a new Colab session starts in the same mode. The VM disk does not keep it. |
 | `OPENCODE_API_KEY` | both | Sent upstream instead of `Bearer public` (paid/Go lane). |
 | `OPENCODE_BASE` | both | Upstream base (default `https://opencode.ai/inference`). |
 | `OPENCODE_UA` | both | Pin the User-Agent; default resolves latest `@opencode/cli` from npm. |
@@ -151,6 +151,12 @@ Given a downstream OpenAI chat-completions request, `proxy.ts`:
    311 tokens), deepseek (348 tokens), and a multi-turn tool-result
    round-trip (416 tokens) — all on a fresh runtime/IP after an earlier
    session's quota exhaustion blocked the first attempt at the last three.
+   `PROXY_SYSTEM=opencode` (panel button **OpenCode mode**) skips this
+   rewrite and the tool rename: the client body is POSTed upstream as
+   received. Safe only when the client is OpenCode, which already includes
+   the `<env>` block and a tool named `read`. Identity headers are still
+   attached. There is no 429→full-prompt retry in this mode, because that
+   retry would replace OpenCode's own system prompt.
 2. **Tools (client's own — the proxy defines no toolset):**
    - Client has a tool named `read` → unchanged.
    - Else, find the client's read-like tool (`/read|view|file|open|…/`, e.g. Cursor's
@@ -269,14 +275,16 @@ built-in default; Start stops with instructions if it is unset (the
 `oc-llm-proxy` name in the 2026-10-25 results below was the then-default). The notebook UI is now an ipywidgets control panel for
 non-coders (`notebooks/colab_panel.py`, exec'd by a one-line loader cell):
 Setup / Run tests / Start public URL / Stop buttons plus a try-it chat box;
-all step-by-step cells were removed. All code fetches (loader + panel Setup)
+all step-by-step cells were removed. The loader cell's metadata is
+`colab.autoexec = {startup: true, wait_interval: 0}` (Colab's "Run on
+startup" schedule). On session connect Colab runs that cell with no play
+click, and the panel calls `do_all()` as soon as it loads. All code fetches (loader + panel Setup)
 go through the GitHub contents API and send `Authorization: Bearer
 <OC_PROXY_GITHUB_REPO_TOKEN>` (fallback `GITHUB_TOKEN`) when that Colab
 secret exists, so the notebook keeps working
 if the repo is made private (fine-grained PAT, this repo only, Contents
 read-only).
-The notebook also exposes the Colab proxy two ways: a Cloudflare quick tunnel
-(random `*.trycloudflare.com` URL per start, no key) and zrok v2 (`zrok2`, token
+The notebook also exposes the Colab proxy via zrok v2 (`zrok2`, token
 from the Colab `ZROK_TOKEN` secret) with the reserved fixed name
 `oc-llm-proxy.shares.zrok.io` — the old v1-era notebook bridge share that held the
 name was deleted with user approval on 2026-10-25 and the name re-bound to the Bun
@@ -284,7 +292,7 @@ proxy on :8787.
 
 ## 9. Security & hygiene notes
 
-- The proxy binds `127.0.0.1` by default. If you tunnel it (zrok/cloudflared), set
+- The proxy binds `127.0.0.1` by default. If you tunnel it (zrok), set
   `PROXY_API_KEY` — otherwise anyone with the URL can spend the anonymous free lane
   through your machine/IP. (The Colab tunnels in §8 currently run keyless by the
   owner's choice; the random/reserved URL is the only protection. Don't share it.)
