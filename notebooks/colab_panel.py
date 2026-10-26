@@ -631,6 +631,14 @@ def _remember_opencode_mode(on):
     return value == flag and not err and not timed_out
 
 
+def _post_to_page(payload):
+    try:
+        _colab_js("(()=>{try{window.top.postMessage(" + json.dumps(payload) +
+                  ", 'https://colab.research.google.com');}catch(e){} return 'posted';})()")
+    except Exception:
+        pass
+
+
 # ------------------------------------------------------- limit notification
 def _looks_like_limit(text):
     t = (text or '').lower()
@@ -656,89 +664,30 @@ def notify_limit_hit(source, detail='', test=False):
         'again on startup and your zrok address stays the same.</div>')
     set_status('🚨 OpenCode free limit hit at ' + when + ' — restart the session (Runtime → Restart session).')
     say('🚨 OpenCode free limit hit (' + when + ', via ' + source + '). ' + QUOTA_HINT)
-    # Signal the main Colab page: eval_js runs in a cross-origin output
-    # frame (*.colab.googleusercontent.com), so its title/localStorage are
-    # invisible to the page - but postMessage to window.top crosses that
-    # boundary by design. The Tampermonkey auto-switch listens for this.
-    # First register the ack listener in this frame, THEN post the hit:
-    # Tampermonkey answers 'oc-limit-ack', and only on that ack do we
-    # unassign this runtime ourselves (see _unassign_on_ack). No ack
-    # (script not installed) -> banner only, runtime left untouched.
+    # Tell the Colab page, then kill this runtime. eval_js runs in a
+    # cross-origin output frame, so postMessage to window.top is the
+    # channel Tampermonkey can see. The 1s delay lets that script write
+    # its reload flag before unassign() tears the kernel down.
     try:
-        _colab_js("(()=>{window.__ocAck=false; if(!window.__ocAckListener){window.__ocAckListener=true;"
-                  " window.addEventListener('message', function(e){ if(e.data && e.data.type==='oc-limit-ack'){ window.__ocAck=true;"
-                  " try{ google.colab.kernel.invokeFunction('oc.limitAck', [], {}); }catch(err){} } });}"
-                  " return 'listening';})()")
-        payload = json.dumps({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source, 'test': bool(test)})
-        _colab_js("(()=>{try{window.top.postMessage(" + payload +
-                  ", 'https://colab.research.google.com');}catch(e){} return 'posted';})()")
-        _schedule_unassign_on_ack()
+        _post_to_page({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source, 'test': bool(test)})
     except Exception:
         pass
+    _unassign_soon()
     return True
 
 
-_UNASSIGN_PENDING = {'on': False, 'thread': None}
-_ACK_STATE = {'event': None}
-
-
-def _on_limit_ack():
-    """Called from the output frame's JS via invokeFunction on ack."""
-    ev = _ACK_STATE.get('event')
-    if ev is not None:
-        ev.set()
-
-
-try:  # kernel callback the frame JS can invoke - no eval_js polling
-    from google.colab import output as _colab_output
-    _colab_output.register_callback('oc.limitAck', _on_limit_ack)
-except Exception:
-    pass
-
-
-def _schedule_unassign_on_ack():
-    """On Tampermonkey's ack, delete THIS runtime via runtime.unassign().
-
-    The kernel knows its own assignment, so this replaces the page-side
-    guesswork of picking which assignment to delete via the API. The ack
-    arrives via the registered 'oc.limitAck' kernel callback (the frame
-    JS calls invokeFunction when it sees the ack message); a few eval_js
-    polls of window.__ocAck are kept only as a fallback. Runs in a
-    daemon thread: notify_limit_hit is often called from the log watcher
-    thread already, and unassign kills this kernel at the end.
-    """
-    prev = _UNASSIGN_PENDING.get('thread')
-    if prev is not None and prev.is_alive():
-        return
-    _ACK_STATE['event'] = threading.Event()
-    _UNASSIGN_PENDING['on'] = True
-
+def _unassign_soon():
+    """Delete this runtime about a second after the limit signal."""
     def worker():
         try:
-            ev = _ACK_STATE.get('event')
-            acked = bool(ev is not None and ev.wait(10))
-            if not acked:  # fallback: the JS flag, if invokeFunction failed
-                for _ in range(3):
-                    value, err, _to = _colab_js("window.__ocAck ? 'yes' : 'no'")
-                    if value == 'yes' and not err:
-                        acked = True
-                        break
-                    time.sleep(0.5)
-            if not acked:
-                return  # no auto-switch script listening - leave runtime alone
-            say('✅ Auto-switch acknowledged — unassigning this runtime now. '
-                'The page will reconnect to a fresh session by itself.')
-            time.sleep(1.0)  # let the page set its reload flag first
+            time.sleep(1.0)
+            say('🛑 Unassigning this runtime. The page reconnects with Ctrl+F9.')
             from google.colab import runtime
             runtime.unassign()
         except Exception:
             pass
-        finally:
-            _UNASSIGN_PENDING['on'] = False
 
-    t = threading.Thread(target=worker, daemon=True)
-    _UNASSIGN_PENDING['thread'] = t
-    t.start()
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def clear_limit_hit(source):
@@ -894,17 +843,8 @@ say('🔔 Limit watcher on: if the OpenCode free limit is hit, a red banner appe
     'at the top of this panel and the Tampermonkey auto-switch is signalled.')
 
 
-def _post_to_page(payload):
-    try:
-        _colab_js("(()=>{try{window.top.postMessage(" + json.dumps(payload) +
-                  ", 'https://colab.research.google.com');}catch(e){} return 'posted';})()")
-    except Exception:
-        pass
-
-
 # Tell the page (Tampermonkey auto-switch) this panel cell is running on
 # this kernel - that is how it verifies a reconnect + Run all worked,
 # without scraping the notebook DOM.
 _post_to_page({'type': 'oc-panel-started', 'ts': int(time.time() * 1000)})
 do_all()
-_post_to_page({'type': 'oc-panel-ready', 'ts': int(time.time() * 1000)})
