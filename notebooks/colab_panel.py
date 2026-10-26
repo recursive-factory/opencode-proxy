@@ -865,4 +865,19 @@ restore_opencode_mode()
 start_limit_watcher()
 say('🔔 Limit watcher on: if the OpenCode free limit is hit, a red banner appears '
     'at the top of this panel and the Tampermonkey auto-switch is signalled.')
+
+
+def _post_to_page(payload):
+    try:
+        _colab_js("(()=>{try{window.top.postMessage(" + json.dumps(payload) +
+                  ", 'https://colab.research.google.com');}catch(e){} return 'posted';})()")
+    except Exception:
+        pass
+
+
+# Tell the page (Tampermonkey auto-switch) this panel cell is running on
+# this kernel - that is how it verifies a reconnect + Run all worked,
+# without scraping the notebook DOM.
+_post_to_page({'type': 'oc-panel-started', 'ts': int(time.time() * 1000)})
 do_all()
+_post_to_page({'type': 'oc-panel-ready', 'ts': int(time.time() * 1000)})
