@@ -680,7 +680,11 @@ def _watch_proxy_log():
     The proxy (started by this panel) writes that log; external apps using
     the public address show up there even though they never click a button.
     """
-    path, offset = '/tmp/proxy.log', 0
+    path = '/tmp/proxy.log'
+    try:  # start at the end - don't replay a previous run's 429s
+        offset = os.path.getsize(path)
+    except Exception:
+        offset = 0
     while True:
         try:
             if os.path.exists(path):
