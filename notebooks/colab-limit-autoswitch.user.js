@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Colab - Limit Auto-Switch
 // @namespace    opencode-proxy
-// @version      1.2.0
-// @description  When the OpenCode free limit is hit in Colab: delete the runtime assignment via API, reload the page, click Connect (through its shadow DOM), verify a fresh assignment is live, then make sure the panel cell runs (Run all if startup did not). The proxy then boots in OpenCode mode on the fresh session.
+// @version      1.3.0
+// @description  When the OpenCode free limit is hit in Colab: delete the runtime assignment via API, reload the page, click Run all (which makes Colab connect to a fresh runtime AND runs the panel cell; Connect button is only a fallback), and verify a fresh assignment is live. The proxy then boots in OpenCode mode on the fresh session.
 // @match        https://colab.research.google.com/*
 // @run-at       document-idle
 // @grant        none
@@ -176,16 +176,31 @@
   };
 
   // ------------------------------------------------------------- switching
+  // Reconnect strategy: click the toolbar's Run all button. With no
+  // runtime attached, Colab connects to a fresh one on its own and then
+  // runs the cells - and the panel is the notebook's only code cell, so
+  // that single click both reconnects and boots the panel. Only if no
+  // new assignment shows up within a minute do we fall back to clicking
+  // Connect explicitly (its click also lands sooner on some accounts).
   async function waitForNewAssignment(deletedId) {
     const deadline = Date.now() + CONNECT_TIMEOUT_MS;
-    let lastClick = 0;
+    const started = Date.now();
+    let lastAction = 0;
     await sleep(AFTER_LOAD_WAIT_MS); // "once loaded, after a sometime"
     while (Date.now() < deadline) {
       try {
         const fresh = (await listIds()).filter(id => id !== deletedId);
         if (fresh.length) { sayBadge('✅ new session live: ' + fresh[0]); return fresh[0]; }
       } catch (e) { /* backend mid-switch */ }
-      if (Date.now() - lastClick > 8000) { if (clickConnect()) lastClick = Date.now(); }
+      if (Date.now() - lastAction > 10000) {
+        let acted = false;
+        if (Date.now() - started < 60000) {
+          acted = await clickRunAll();
+          if (acted) sayBadge('▶️ clicked Run all - Colab connects to a fresh runtime and runs the panel…');
+        }
+        if (!acted) acted = clickConnect();
+        if (acted) lastAction = Date.now();
+      }
       await sleep(3000);
     }
     sayBadge('⚠️ no new assignment after 5 min - click Connect manually');
@@ -285,7 +300,7 @@
     let flag = null;
     try { flag = JSON.parse(sessionStorage.getItem(FLAG) || 'null'); } catch (e) {}
     if (flag && Date.now() - flag.ts < 600000) {
-      sayBadge('🔄 page reloaded after delete - connecting in ' + (AFTER_LOAD_WAIT_MS / 1000) + 's…');
+      sayBadge('🔄 page reloaded after delete - reconnecting via Run all in ' + (AFTER_LOAD_WAIT_MS / 1000) + 's…');
       const got = await waitForNewAssignment(flag.deletedId);
       if (got) { sessionStorage.removeItem(FLAG); await ensurePanelStarted(); }
       return;
