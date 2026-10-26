@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Colab - Limit Auto-Switch
 // @namespace    opencode-proxy
-// @version      1.4.0
-// @description  When the OpenCode free limit is hit in Colab: delete the runtime assignment via API, reload the page, press Ctrl+F9 (Run all - Colab connects to a fresh runtime AND runs the panel cell; button clicks are only fallbacks), and verify a fresh assignment is live. The proxy then boots in OpenCode mode on the fresh session.
+// @version      1.5.0
+// @description  When the OpenCode free limit is hit in Colab: ack the panel so it unassigns its own runtime (google.colab.runtime.unassign), reload the page, wait for the old assignment to disappear, press Ctrl+F9 (Run all - Colab connects to a fresh runtime AND runs the panel cell; API delete / button clicks are fallbacks), and verify a fresh assignment is live. The proxy then boots in OpenCode mode on the fresh session.
 // @match        https://colab.research.google.com/*
 // @run-at       document-idle
 // @grant        none
@@ -27,7 +27,6 @@
   // ---------------------------------------------------------------- config
   const AUTO_ON_LIMIT = true;        // switch automatically on the panel's limit signal
   const MAX_PER_HOUR = 2;            // loop guard (persisted in localStorage)
-  const AFTER_LOAD_WAIT_MS = 5000;   // after a reload, wait this long before clicking Connect
   const CONNECT_TIMEOUT_MS = 300000; // give up after 5 min
   const PANEL_GRACE_MS = 25000;      // after reconnect, give run-on-startup this long before clicking Run all ourselves
   const FLAG = 'oc-switch-reload';   // sessionStorage: survives reload, per tab
@@ -210,20 +209,46 @@
   };
 
   // ------------------------------------------------------------- switching
-  // Reconnect strategy: press Ctrl+F9 (Run all). With no runtime
+  // After a reload we expect the OLD assignment to disappear first (the
+  // panel unassigns its own runtime on our ack; or we deleted it via the
+  // API in the manual path). Do NOT press Ctrl+F9 while the old runtime
+  // is still attached - Run all would just re-run the panel on the old,
+  // limited kernel. If the old assignment is still there after 40s, the
+  // kernel-side unassign evidently did not happen: delete it via the
+  // API ourselves as a fallback.
+  // Then the reconnect itself: press Ctrl+F9 (Run all). With no runtime
   // attached, Colab connects to a fresh one on its own and then runs
   // the cells - and the panel is the notebook's only code cell, so that
-  // one keypress both reconnects and boots the panel. If no new
-  // assignment shows up within a minute, fall back to clicking the Run
-  // all / Connect buttons through the shadow DOM.
-  async function waitForNewAssignment(deletedId) {
+  // one keypress both reconnects and boots the panel. Button clicks
+  // through the shadow DOM are the last-resort fallback.
+  async function waitForNewAssignment(beforeIds) {
     const deadline = Date.now() + CONNECT_TIMEOUT_MS;
+    let current = [];
+    // Phase A: wait for the old assignment to go away (or a fresh one
+    // to appear, if the switch somehow already happened).
+    const goneDeadline = Date.now() + 40000;
+    while (Date.now() < goneDeadline) {
+      try {
+        current = await listIds();
+        const fresh = current.filter(id => !beforeIds.includes(id));
+        if (fresh.length) { sayBadge('✅ new session live: ' + fresh[0]); return fresh[0]; }
+        if (beforeIds.some(id => !current.includes(id))) break; // ours is gone
+      } catch (e) { /* backend mid-switch */ }
+      await sleep(3000);
+    }
+    if (beforeIds.length && beforeIds.every(id => current.includes(id))) {
+      sayBadge('⚠️ old runtime still assigned - deleting it via API as fallback…');
+      try {
+        const id = await pickCurrentAssignment();
+        if (id) { await rpc('DeleteAssignment', [id]); await sleep(2000); }
+      } catch (e) { console.warn('[auto-switch] fallback delete failed:', e.message); }
+    }
+    // Phase B: Ctrl+F9 until a fresh assignment appears.
     const started = Date.now();
     let lastAction = 0;
-    await sleep(AFTER_LOAD_WAIT_MS); // "once loaded, after a sometime"
     while (Date.now() < deadline) {
       try {
-        const fresh = (await listIds()).filter(id => id !== deletedId);
+        const fresh = (await listIds()).filter(id => !beforeIds.includes(id));
         if (fresh.length) { sayBadge('✅ new session live: ' + fresh[0]); return fresh[0]; }
       } catch (e) { /* backend mid-switch */ }
       if (Date.now() - lastAction > 10000) {
@@ -262,7 +287,7 @@
         const times = recentSwitches(); times.push(Date.now());
         localStorage.setItem(TIMES, JSON.stringify(times));
       }
-      sessionStorage.setItem(FLAG, JSON.stringify({ ts: Date.now(), deletedId: id }));
+      sessionStorage.setItem(FLAG, JSON.stringify({ ts: Date.now(), beforeIds: [id] }));
       await sleep(600);
       location.reload(); // phase 2 in main() runs after load (userscript survives)
     } catch (e) {
@@ -319,6 +344,38 @@
     sayBadge('⚠️ panel still has not started - press Ctrl+F9 manually');
   }
 
+  // Primary limit path: the panel deletes its OWN runtime. It posts
+  // oc-limit-hit and waits for our ack; on the ack it calls
+  // google.colab.runtime.unassign() - no guessing which assignment is
+  // whose on this side. Our job: ack immediately, snapshot the current
+  // assignment IDs (so phase 2 can tell old from fresh), set the reload
+  // flag, and reload. If the loop-guard is tripped we do NOT ack, so
+  // the panel leaves its runtime alone.
+  async function switchViaUnassign(reason, manual = false) {
+    if (switching) return;
+    if (!manual && recentSwitches().length >= MAX_PER_HOUR) { sayBadge('⚠️ already switched ' + MAX_PER_HOUR + 'x this hour - paused, not acking (' + reason + '). Manual: __ocAutoSwitch.reset() clears this'); return; }
+    switching = true;
+    try {
+      sayBadge('🚨 limit hit - telling the panel to unassign its runtime… (' + reason + ')');
+      for (const f of document.querySelectorAll('iframe')) {
+        try { f.contentWindow.postMessage({ type: 'oc-limit-ack' }, '*'); } catch (e) {}
+      }
+      let beforeIds = [];
+      try { beforeIds = await listIds(); } catch (e) { /* phase 2 falls back to API delete */ }
+      if (!manual) {
+        const times = recentSwitches(); times.push(Date.now());
+        localStorage.setItem(TIMES, JSON.stringify(times));
+      }
+      sessionStorage.setItem(FLAG, JSON.stringify({ ts: Date.now(), beforeIds }));
+      await sleep(1000); // let the panel see the ack and start unassigning
+      location.reload(); // phase 2 in main() runs after load (userscript survives)
+    } catch (e) {
+      sayBadge('❌ switch failed: ' + e.message);
+    } finally {
+      switching = false;
+    }
+  }
+
   // Panel -> page signal (see header comment). Origin must be the kernel's
   // output frame; ts guards against replayed/stale signals.
   window.addEventListener('message', (e) => {
@@ -331,7 +388,7 @@
     if (d.type === 'oc-limit-hit') {
       if (!AUTO_ON_LIMIT) { sayBadge('🔕 limit signal received but AUTO_ON_LIMIT is off'); return; }
       if (d.ts && Date.now() - d.ts > 120000) { sayBadge('⚠️ ignored stale limit signal'); return; }
-      switchNow('postMessage from panel (' + (d.source || '?') + ')', d.test === true);
+      switchViaUnassign('postMessage from panel (' + (d.source || '?') + ')', d.test === true);
     }
   });
 
@@ -342,8 +399,9 @@
     let flag = null;
     try { flag = JSON.parse(sessionStorage.getItem(FLAG) || 'null'); } catch (e) {}
     if (flag && Date.now() - flag.ts < 600000) {
-      sayBadge('🔄 page reloaded after delete - reconnecting via Run all in ' + (AFTER_LOAD_WAIT_MS / 1000) + 's…');
-      const got = await waitForNewAssignment(flag.deletedId);
+      sayBadge('🔄 page reloaded - waiting for the old runtime to disappear, then Ctrl+F9…');
+      const beforeIds = flag.beforeIds || (flag.deletedId ? [flag.deletedId] : []);
+      const got = await waitForNewAssignment(beforeIds);
       if (got) { sessionStorage.removeItem(FLAG); await ensurePanelStarted(); }
       return;
     }

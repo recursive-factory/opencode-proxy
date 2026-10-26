@@ -660,13 +660,58 @@ def notify_limit_hit(source, detail='', test=False):
     # frame (*.colab.googleusercontent.com), so its title/localStorage are
     # invisible to the page - but postMessage to window.top crosses that
     # boundary by design. The Tampermonkey auto-switch listens for this.
+    # First register the ack listener in this frame, THEN post the hit:
+    # Tampermonkey answers 'oc-limit-ack', and only on that ack do we
+    # unassign this runtime ourselves (see _unassign_on_ack). No ack
+    # (script not installed) -> banner only, runtime left untouched.
     try:
+        _colab_js("(()=>{window.__ocAck=false; if(!window.__ocAckListener){window.__ocAckListener=true;"
+                  " window.addEventListener('message', function(e){ if(e.data && e.data.type==='oc-limit-ack') window.__ocAck=true; });}"
+                  " return 'listening';})()")
         payload = json.dumps({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source, 'test': bool(test)})
         _colab_js("(()=>{try{window.top.postMessage(" + payload +
                   ", 'https://colab.research.google.com');}catch(e){} return 'posted';})()")
+        _schedule_unassign_on_ack()
     except Exception:
         pass
     return True
+
+
+_UNASSIGN_PENDING = {'on': False}
+
+
+def _schedule_unassign_on_ack():
+    """On Tampermonkey's ack, delete THIS runtime via runtime.unassign().
+
+    The kernel knows its own assignment, so this replaces the page-side
+    guesswork of picking which assignment to delete via the API. Runs in
+    a daemon thread: notify_limit_hit is often called from the log
+    watcher thread already, and unassign kills this kernel at the end.
+    """
+    if _UNASSIGN_PENDING['on']:
+        return
+    _UNASSIGN_PENDING['on'] = True
+
+    def worker():
+        try:
+            acked = False
+            for _ in range(20):  # poll ~10s for the ack
+                time.sleep(0.5)
+                value, err, _to = _colab_js("window.__ocAck ? 'yes' : 'no'")
+                if value == 'yes' and not err:
+                    acked = True
+                    break
+            if not acked:
+                return  # no auto-switch script listening - leave runtime alone
+            time.sleep(1.0)  # let the page set its reload flag first
+            from google.colab import runtime
+            runtime.unassign()
+        except Exception:
+            pass
+        finally:
+            _UNASSIGN_PENDING['on'] = False
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def clear_limit_hit(source):
