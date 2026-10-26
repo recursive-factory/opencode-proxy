@@ -664,39 +664,16 @@ def notify_limit_hit(source, detail='', test=False):
         'again on startup and your zrok address stays the same.</div>')
     set_status('🚨 OpenCode free limit hit at ' + when + ' — restart the session (Runtime → Restart session).')
     say('🚨 OpenCode free limit hit (' + when + ', via ' + source + '). ' + QUOTA_HINT)
-    # Must run on this cell's execution thread. Colab closes the cell
-    # output when the cell finishes, and eval_js from any other thread
-    # never reaches Tampermonkey. The promise below posts oc-limit-hit
-    # and resolves when the page answers oc-limit-ack.
-    acked = _post_limit_and_wait_ack(source, test)
-    if not acked:
-        STATE['limit_hit'] = False
-        say('⚠️ No acknowledgement from the auto-switch script. This runtime stays up. '
-            'Install the Tampermonkey script, or use Runtime → Restart session.')
-        return True
-    say('✅ Tampermonkey acknowledged. Unassigning this runtime before the page reloads.')
+    # Post and return. Do not wait for Tampermonkey. eval_js runs on this
+    # cell's thread, so the message is handed to the page before we stop.
+    _post_to_page({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source, 'test': bool(test)})
+    say('🛑 Stopping this runtime now. The page reloads after the session is gone.')
     try:
         from google.colab import runtime
         runtime.unassign()
     except Exception as e:
         say('⚠️ Could not unassign this runtime: ' + str(e))
     return True
-
-
-def _post_limit_and_wait_ack(source, test):
-    payload = json.dumps({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source, 'test': bool(test)})
-    js = (
-        "new Promise(function(resolve){"
-        "var timer=setTimeout(function(){resolve('timeout');},12000);"
-        "function onAck(e){if(e.data&&e.data.type==='oc-limit-ack'){clearTimeout(timer);"
-        "window.removeEventListener('message',onAck);resolve('acked');}}"
-        "window.addEventListener('message',onAck);"
-        "try{window.top.postMessage(" + payload + ",'https://colab.research.google.com');}"
-        "catch(err){clearTimeout(timer);resolve('post-failed');}"
-        "})"
-    )
-    value, err, timed_out = _colab_js(js, timeout=20)
-    return value == 'acked' and not err and not timed_out
 
 
 def clear_limit_hit(source):
