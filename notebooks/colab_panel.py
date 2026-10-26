@@ -515,6 +515,8 @@ breakdown_btn = widgets.Button(description='Show breakdown', button_style='info'
 download_btn = widgets.Button(description='Download dump', layout=widgets.Layout(width='160px'))
 dump_off_btn = widgets.Button(description='Turn off & clear dump', button_style='danger',
                               layout=widgets.Layout(width='200px'))
+limit_test_btn = widgets.Button(description='🧪 Test limit alert', button_style='warning',
+                                layout=widgets.Layout(width='220px'))
 all_btn = widgets.Button(description='🚀 One-click: do everything for me',
                          button_style='success',
                          layout=widgets.Layout(width='100%', height='48px'))
@@ -680,6 +682,19 @@ def clear_limit_hit(source):
         pass
 
 
+def do_limit_test(_):
+    # Manual end-to-end test: same path as a real limit (banner + the
+    # postMessage the Tampermonkey auto-switch listens for). Reset the
+    # once-per-episode flag first so the test can be re-run any time.
+    STATE['limit_hit'] = False
+    notify_limit_hit('panel test button')
+    say('🧪 Test alert fired. If the Tampermonkey auto-switch is installed, '
+        'this session will now be deleted and reconnected automatically.')
+
+
+limit_test_btn.on_click(do_limit_test)
+
+
 def _watch_proxy_log():
     """Tail /tmp/proxy.log: '✗ … -> upstream 429' = limit, '✓ …' = recovered.
 
@@ -782,6 +797,11 @@ panel = widgets.VBox([
                       'is the body posted to the API. Turn it OFF only for Cursor, VS Code, '
                       'pi.dev, or the Ask box below — an explicit OFF is remembered in this '
                       'browser; anything else (new browser, cleared storage) starts ON again.')]),
+    section('🔔 Limit alert', [
+        limit_test_btn,
+        widgets.Label('Fires the same alert as a real limit hit: red banner above + signal to the '
+                      'Tampermonkey auto-switch. With that script installed this WILL delete and '
+                      'reconnect this session — use it only to test the auto-switch end to end.')]),
     section('💬 Try the models', [
         widgets.HBox([model_dd, prompt_text, ask_btn]),
         widgets.Label('A quick chat, right here in the notebook. Works once the proxy is running.')]),
@@ -798,6 +818,6 @@ display(panel)
 say('👋 Session connected. Starting setup, tests, and your public address — no buttons to press.')
 restore_opencode_mode()
 start_limit_watcher()
-say('🔔 Limit watcher on: if the OpenCode free limit is hit, a red banner, a '
-    'browser notification, and a beep will appear here.')
+say('🔔 Limit watcher on: if the OpenCode free limit is hit, a red banner appears '
+    'at the top of this panel and the Tampermonkey auto-switch is signalled.')
 do_all()
