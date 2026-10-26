@@ -654,10 +654,16 @@ def notify_limit_hit(source, detail=''):
         'again on startup and your zrok address stays the same.</div>')
     set_status('🚨 OpenCode free limit hit at ' + when + ' — restart the session (Runtime → Restart session).')
     say('🚨 OpenCode free limit hit (' + when + ', via ' + source + '). ' + QUOTA_HINT)
-    # No title/Notification attempt here: google.colab eval_js runs in the
-    # cell-output iframe, so document.title there is not the Colab tab.
-    # The banner text above is the signal the Tampermonkey auto-switch
-    # watches for in the main page DOM.
+    # Signal the main Colab page: eval_js runs in a cross-origin output
+    # frame (*.colab.googleusercontent.com), so its title/localStorage are
+    # invisible to the page - but postMessage to window.top crosses that
+    # boundary by design. The Tampermonkey auto-switch listens for this.
+    try:
+        payload = json.dumps({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source})
+        _colab_js("(()=>{try{window.top.postMessage(" + payload +
+                  ", 'https://colab.research.google.com');}catch(e){} return 'posted';})()")
+    except Exception:
+        pass
     return True
 
 
@@ -667,6 +673,11 @@ def clear_limit_hit(source):
     STATE['limit_hit'] = False
     notify_out.value = ''
     say('✅ Limit alert cleared (' + source + ') — requests are working again.')
+    try:
+        _colab_js("(()=>{try{window.top.postMessage({type:'oc-limit-clear'}, "
+                  "'https://colab.research.google.com');}catch(e){} return 'posted';})()")
+    except Exception:
+        pass
 
 
 def _watch_proxy_log():
