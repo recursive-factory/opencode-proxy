@@ -86,11 +86,13 @@ def setup():
         log('installing bun')
         subprocess.run('curl -fsSL https://bun.sh/install | bash', shell=True, check=True)
     log('bun ' + sh(['bun', '--version']).stdout.strip())
-    os.makedirs(os.path.join(ROOT, 'src'), exist_ok=True)
-    os.makedirs(os.path.join(ROOT, 'data'), exist_ok=True)
+    os.makedirs(ROOT, exist_ok=True)
+    # Flat copy, same as the panel: proxy.ts imports ./fingerprint.ts and
+    # looks for opencode-system.txt beside itself.
     for path in FILES:
-        fetch_file(path, os.path.join(ROOT, path))
-        log('got ' + path)
+        name = os.path.basename(path)
+        fetch_file(path, os.path.join(ROOT, name))
+        log('got ' + name)
 
 
 def start_proxy():
@@ -105,7 +107,11 @@ def start_proxy():
             log('proxy listening on 8787')
             return
         time.sleep(1)
-    raise RuntimeError('proxy did not start')
+    try:
+        tail = open(LOG, errors='replace').read()[-2000:]
+    except Exception:
+        tail = ''
+    raise RuntimeError('proxy did not start\n' + tail)
 
 
 def start_zrok():
