@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode Colab - Limit Auto-Switch
 // @namespace    opencode-proxy
-// @version      1.3.0
+// @version      1.3.1
 // @description  When the OpenCode free limit is hit in Colab: delete the runtime assignment via API, reload the page, click Run all (which makes Colab connect to a fresh runtime AND runs the panel cell; Connect button is only a fallback), and verify a fresh assignment is live. The proxy then boots in OpenCode mode on the fresh session.
 // @match        https://colab.research.google.com/*
 // @run-at       document-idle
@@ -153,17 +153,33 @@
     else if (Array.isArray(v)) v.forEach(x => flatten(x, out));
     return out;
   };
+  // Everything on this page that might mention the current assignment:
+  // URL, serialized frontend state (innerHTML), iframe URLs, loaded
+  // resource URLs, and storage keys AND values (not just values).
+  const pageText = () => {
+    const parts = [location.href, document.documentElement?.innerHTML || ''];
+    for (const f of document.querySelectorAll('iframe')) parts.push(f.src || '');
+    try { for (const e of performance.getEntriesByType('resource')) parts.push(e.name); } catch (e) {}
+    for (const store of [localStorage, sessionStorage]) {
+      try { for (let i = 0; i < store.length; i++) { const k = store.key(i); parts.push(k, store.getItem(k)); } } catch (e) {}
+    }
+    return parts.join('\n');
+  };
   const pickCurrentAssignment = async () => {
     const records = await listRecords();
-    if (!records.length) return null;
+    if (!records.length) { console.warn('[auto-switch] ListAssignments returned no assignments'); return null; }
     if (records.length === 1) return records[0][0];
-    // Multiple live assignments: only delete when one matches this
-    // notebook (its hash shows up in the page's storage / URL). When
-    // unsure, delete nothing - a wrong delete kills someone else's VM.
-    const pageSources = [location.href, ...Object.values(localStorage), ...Object.values(sessionStorage)].join('\n');
-    const byHash = records.find(r => flatten(r).some(s => s.length >= 40 && pageSources.includes(s)));
+    // Multiple live assignments: only delete one we can tie to THIS
+    // notebook/page. When unsure, delete nothing - a wrong delete
+    // kills another notebook's VM.
+    const text = pageText();
+    // (a) the assignment ID itself is mentioned somewhere on the page
+    const byId = records.find(r => text.includes(r[0]));
+    if (byId) return byId[0];
+    // (b) a long record field (e.g. the notebook hash) appears on the page
+    const byHash = records.find(r => flatten(r).some(s => s.length >= 40 && text.includes(s)));
     if (byHash) return byHash[0];
-    console.warn('[auto-switch] multiple assignments, no notebook match:', records.map(r => r[0]));
+    console.warn('[auto-switch] multiple assignments, no page match:', records.map(r => r[0]));
     return null;
   };
 
@@ -313,6 +329,14 @@
   window.__ocAutoSwitch = {
     now: () => switchNow('manual', true),
     reset: () => { localStorage.removeItem(TIMES); sayBadge('🔔 loop-guard cleared - auto-switch watching again'); },
+    debug: async () => {
+      const records = await listRecords();
+      const text = pageText();
+      const info = records.map(r => ({ id: r[0], onThisPage: text.includes(r[0]) }));
+      console.log('[auto-switch] assignments:', info);
+      sayBadge('🔍 ' + records.length + ' assignment(s): ' + info.map(i => i.id + (i.onThisPage ? ' ← this page' : '')).join(', '));
+      return info;
+    },
     stop: () => { sayBadge('⏹️ auto-switch stopped for this page'); window.__ocAutoSwitch = null; },
   };
   main();
