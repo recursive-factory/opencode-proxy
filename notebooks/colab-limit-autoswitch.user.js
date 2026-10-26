@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Colab - Limit Auto-Switch
 // @namespace    opencode-proxy
-// @version      3.1.0
-// @description  On the panel's limit signal, acknowledge it (the panel then unassigns), reload, wait, and press Ctrl+F9. Stop when the new panel posts oc-panel-started.
+// @version      3.2.0
+// @description  On the panel's limit signal, acknowledge it (the panel then unassigns). Reload only after that session has stopped, so Colab does not ask to continue a running cell. Then press Ctrl+F9. Stop when the new panel posts oc-panel-started.
 // @match        https://colab.research.google.com/*
 // @run-at       document-idle
 // @grant        none
@@ -49,15 +49,31 @@
   let started = false;
   let switching = false;
 
-  function onLimitHit() {
+  const connectLabel = () => {
+    const host = document.querySelector('colab-connect-button');
+    return ((host && (host.innerText || host.textContent)) || '').toLowerCase();
+  };
+  // Reload only after the runtime is gone. Reloading while the panel cell
+  // is still on [*] makes Colab open a continue/leave dialog.
+  async function onLimitHit() {
     if (switching || sessionStorage.getItem(FLAG)) return;
     switching = true;
-    sayBadge('🚨 limit hit - acknowledging, then reloading…');
+    sayBadge('🚨 limit hit - acknowledging, then waiting for the session to end…');
     for (const f of document.querySelectorAll('iframe')) {
       try { f.contentWindow.postMessage({ type: 'oc-limit-ack' }, '*'); } catch (e) {}
     }
     sessionStorage.setItem(FLAG, String(Date.now()));
-    setTimeout(() => location.reload(), 1500);
+    await sleep(2500); // panel calls runtime.unassign() as soon as it sees the ack
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      const label = connectLabel();
+      if (label && !/busy|running|initializing|connecting/.test(label)) break;
+      sayBadge('⏳ session ending (' + (label || 'waiting') + ') — reload after it stops…');
+      await sleep(500);
+    }
+    window.onbeforeunload = null;
+    sayBadge('🔄 session stopped - reloading…');
+    location.reload();
   }
 
   window.addEventListener('message', (e) => {

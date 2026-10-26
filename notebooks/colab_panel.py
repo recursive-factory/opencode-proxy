@@ -674,8 +674,7 @@ def notify_limit_hit(source, detail='', test=False):
         say('⚠️ No acknowledgement from the auto-switch script. This runtime stays up. '
             'Install the Tampermonkey script, or use Runtime → Restart session.')
         return True
-    say('✅ Tampermonkey acknowledged. Unassigning this runtime.')
-    time.sleep(1.0)
+    say('✅ Tampermonkey acknowledged. Unassigning this runtime before the page reloads.')
     try:
         from google.colab import runtime
         runtime.unassign()
