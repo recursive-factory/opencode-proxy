@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode Colab - Limit Auto-Switch
 // @namespace    opencode-proxy
-// @version      2.0.0
+// @version      2.0.1
 // @description  On the panel's limit signal: ack it (the panel then unassigns its own runtime), reload, wait for the old assignment to disappear, press Ctrl+F9, and wait for the panel to announce it started on the fresh runtime.
 // @match        https://colab.research.google.com/*
 // @run-at       document-idle
@@ -28,7 +28,7 @@
 
   const AUTO_ON_LIMIT = true;
   const MAX_PER_HOUR = 2;            // loop guard for AUTOMATIC switches only
-  const OLD_GONE_MS = 60000;         // wait for the old assignment to disappear
+  const OLD_GONE_MS = 30000;         // wait for the old assignment to disappear
   const START_TIMEOUT_MS = 300000;   // total patience for the new panel to start
   const FLAG = 'oc-switch-reload';   // sessionStorage: survives reload, per tab
   const TIMES = 'oc-limit-switch-times';
@@ -54,7 +54,7 @@
     const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(ts + ' ' + sapisid + ' https://colab.research.google.com'));
     const hash = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
     const res = await fetch('https://colab.clients6.google.com/$rpc/google.internal.colab.v1.RuntimeService/ListAssignments', {
-      method: 'POST', credentials: 'include',
+      method: 'POST', credentials: 'include', signal: AbortSignal.timeout(8000),
       headers: { 'content-type': 'application/json+protobuf', 'x-goog-api-key': 'AIzaSyA2BvntLwNwFthUB4w6_Bhn0cMlVHwyaHc', 'x-goog-authuser': '0', 'x-user-agent': 'grpc-web-javascript/0.1', 'authorization': 'SAPISIDHASH ' + ts + '_' + hash },
       body: '[]',
     });
@@ -159,14 +159,17 @@
   async function reconnect(beforeIds) {
     sayBadge('🔄 page reloaded - waiting for the old runtime to disappear…');
     const goneDeadline = Date.now() + OLD_GONE_MS;
-    while (Date.now() < goneDeadline) {
+    let gone = !beforeIds.length;
+    while (!gone && Date.now() < goneDeadline) {
       if (await waitStarted(Date.now())) return; // panel already up (fast path)
       try {
         const now = await listIds();
-        if (now.some(id => !beforeIds.includes(id)) || beforeIds.some(id => !now.includes(id))) break;
-      } catch (e) { break; } // cannot verify - proceed anyway
+        if (now.some(id => !beforeIds.includes(id)) || beforeIds.some(id => !now.includes(id))) { gone = true; break; }
+        sayBadge('⏳ old runtime still listed (' + now.join(', ') + ') - waiting ' + Math.ceil((goneDeadline - Date.now()) / 1000) + 's…');
+      } catch (e) { gone = true; break; } // cannot verify - proceed anyway
       await sleep(3000);
     }
+    if (!gone) sayBadge('⚠️ old runtime still listed after ' + (OLD_GONE_MS / 1000) + 's - proceeding with Ctrl+F9 anyway…');
     if (await waitStarted(Date.now() + 20000)) return; // run-on-startup did it
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {
