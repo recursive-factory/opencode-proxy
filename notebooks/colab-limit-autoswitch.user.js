@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Colab - Limit Auto-Switch
 // @namespace    opencode-proxy
-// @version      3.0.0
-// @description  On the panel's limit signal, reload the page, wait, and press Ctrl+F9. The panel unassigns its own runtime. Stop when the new panel posts oc-panel-started.
+// @version      3.1.0
+// @description  On the panel's limit signal, acknowledge it (the panel then unassigns), reload, wait, and press Ctrl+F9. Stop when the new panel posts oc-panel-started.
 // @match        https://colab.research.google.com/*
 // @run-at       document-idle
 // @grant        none
@@ -13,7 +13,8 @@
 // Console: __ocAutoSwitch.stop()
 //
 // Kernel JS runs in a cross-origin iframe, so the only channel is postMessage:
-//   panel -> page   {type:'oc-limit-hit'}     then the panel calls runtime.unassign()
+//   panel -> page   {type:'oc-limit-hit'}
+//   page  -> panel  {type:'oc-limit-ack'}     panel then calls runtime.unassign()
 //   panel -> page   {type:'oc-panel-started'} panel cell is running on this kernel
 
 (function () {
@@ -51,9 +52,12 @@
   function onLimitHit() {
     if (switching || sessionStorage.getItem(FLAG)) return;
     switching = true;
+    sayBadge('🚨 limit hit - acknowledging, then reloading…');
+    for (const f of document.querySelectorAll('iframe')) {
+      try { f.contentWindow.postMessage({ type: 'oc-limit-ack' }, '*'); } catch (e) {}
+    }
     sessionStorage.setItem(FLAG, String(Date.now()));
-    sayBadge('🚨 limit hit - reloading…');
-    setTimeout(() => location.reload(), 500);
+    setTimeout(() => location.reload(), 1500);
   }
 
   window.addEventListener('message', (e) => {

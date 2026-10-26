@@ -664,30 +664,61 @@ def notify_limit_hit(source, detail='', test=False):
         'again on startup and your zrok address stays the same.</div>')
     set_status('🚨 OpenCode free limit hit at ' + when + ' — restart the session (Runtime → Restart session).')
     say('🚨 OpenCode free limit hit (' + when + ', via ' + source + '). ' + QUOTA_HINT)
-    # Tell the Colab page, then kill this runtime. eval_js runs in a
-    # cross-origin output frame, so postMessage to window.top is the
-    # channel Tampermonkey can see. The 1s delay lets that script write
-    # its reload flag before unassign() tears the kernel down.
-    try:
-        _post_to_page({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source, 'test': bool(test)})
-    except Exception:
-        pass
-    _unassign_soon()
+    # Tell Tampermonkey, then unassign only after it answers. No ack
+    # means the script is not installed, so this runtime stays up.
+    _signal_and_unassign_on_ack(source, test)
     return True
 
 
-def _unassign_soon():
-    """Delete this runtime about a second after the limit signal."""
+_LIMIT_ACK = {'event': None, 'thread': None}
+
+
+def _on_limit_ack():
+    ev = _LIMIT_ACK.get('event')
+    if ev is not None:
+        ev.set()
+
+
+try:
+    from google.colab import output as _colab_output
+    _colab_output.register_callback('oc.limitAck', _on_limit_ack)
+except Exception:
+    pass
+
+
+def _signal_and_unassign_on_ack(source, test):
+    """Post oc-limit-hit, unassign only after Tampermonkey's oc-limit-ack."""
+    prev = _LIMIT_ACK.get('thread')
+    if prev is not None and prev.is_alive():
+        return
+    ev = threading.Event()
+    _LIMIT_ACK['event'] = ev
+
     def worker():
         try:
+            payload = json.dumps({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source, 'test': bool(test)})
+            # Listener first, then the hit, in the same frame. The ack
+            # calls invokeFunction so the kernel sees it without polling.
+            _colab_js(
+                "(()=>{if(!window.__ocAckListener){window.__ocAckListener=true;"
+                "window.addEventListener('message',function(e){if(e.data&&e.data.type==='oc-limit-ack'){"
+                "try{google.colab.kernel.invokeFunction('oc.limitAck',[],{});}catch(err){}}});}"
+                "try{window.top.postMessage(" + payload + ",'https://colab.research.google.com');}catch(e){}"
+                "return 'posted';})()")
+            if not ev.wait(12):
+                say('⚠️ No acknowledgement from the auto-switch script. This runtime stays up. '
+                    'Install the Tampermonkey script, or use Runtime → Restart session.')
+                return
+            say('✅ Tampermonkey acknowledged. Unassigning this runtime.')
             time.sleep(1.0)
-            say('🛑 Unassigning this runtime. The page reconnects with Ctrl+F9.')
             from google.colab import runtime
             runtime.unassign()
         except Exception:
             pass
 
-    threading.Thread(target=worker, daemon=True).start()
+    t = threading.Thread(target=worker, daemon=True)
+    _LIMIT_ACK['thread'] = t
+    t.start()
 
 
 def clear_limit_hit(source):

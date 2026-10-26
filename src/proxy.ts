@@ -248,6 +248,19 @@ Bun.serve({
       if (PROXY_KEY && req.headers.get("authorization") !== `Bearer ${PROXY_KEY}` && url.pathname !== "/health")
         return json(errBody("invalid proxy API key", "auth_error"), 401);
       if (req.method === "GET" && url.pathname === "/health") return json({ ok: true, runtime: `bun ${Bun.version}`, system: SYSTEM_MODE });
+      // Fake quota failure. Same JSON and status the real upstream returns,
+      // plus the log line the Colab panel watches for, so a single request
+      // exercises the Tampermonkey switch without spending free quota.
+      if ((req.method === "GET" || req.method === "POST") && url.pathname === "/test") {
+        console.log("✗ test -> upstream 429 (FreeUsageLimitError, dummy /test)");
+        return json({
+          type: "error",
+          error: {
+            type: "FreeUsageLimitError",
+            message: "Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go",
+          },
+        }, 429);
+      }
       if (req.method === "GET" && (url.pathname === "/v1/models" || url.pathname === "/models")) {
         try {
           const r = await fetch(`${BASE}/v1/models`, { signal: AbortSignal.timeout(10_000) });
