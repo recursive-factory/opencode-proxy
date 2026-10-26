@@ -664,61 +664,40 @@ def notify_limit_hit(source, detail='', test=False):
         'again on startup and your zrok address stays the same.</div>')
     set_status('🚨 OpenCode free limit hit at ' + when + ' — restart the session (Runtime → Restart session).')
     say('🚨 OpenCode free limit hit (' + when + ', via ' + source + '). ' + QUOTA_HINT)
-    # Tell Tampermonkey, then unassign only after it answers. No ack
-    # means the script is not installed, so this runtime stays up.
-    _signal_and_unassign_on_ack(source, test)
+    # Must run on this cell's execution thread. Colab closes the cell
+    # output when the cell finishes, and eval_js from any other thread
+    # never reaches Tampermonkey. The promise below posts oc-limit-hit
+    # and resolves when the page answers oc-limit-ack.
+    acked = _post_limit_and_wait_ack(source, test)
+    if not acked:
+        STATE['limit_hit'] = False
+        say('⚠️ No acknowledgement from the auto-switch script. This runtime stays up. '
+            'Install the Tampermonkey script, or use Runtime → Restart session.')
+        return True
+    say('✅ Tampermonkey acknowledged. Unassigning this runtime.')
+    time.sleep(1.0)
+    try:
+        from google.colab import runtime
+        runtime.unassign()
+    except Exception as e:
+        say('⚠️ Could not unassign this runtime: ' + str(e))
     return True
 
 
-_LIMIT_ACK = {'event': None, 'thread': None}
-
-
-def _on_limit_ack():
-    ev = _LIMIT_ACK.get('event')
-    if ev is not None:
-        ev.set()
-
-
-try:
-    from google.colab import output as _colab_output
-    _colab_output.register_callback('oc.limitAck', _on_limit_ack)
-except Exception:
-    pass
-
-
-def _signal_and_unassign_on_ack(source, test):
-    """Post oc-limit-hit, unassign only after Tampermonkey's oc-limit-ack."""
-    prev = _LIMIT_ACK.get('thread')
-    if prev is not None and prev.is_alive():
-        return
-    ev = threading.Event()
-    _LIMIT_ACK['event'] = ev
-
-    def worker():
-        try:
-            payload = json.dumps({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source, 'test': bool(test)})
-            # Listener first, then the hit, in the same frame. The ack
-            # calls invokeFunction so the kernel sees it without polling.
-            _colab_js(
-                "(()=>{if(!window.__ocAckListener){window.__ocAckListener=true;"
-                "window.addEventListener('message',function(e){if(e.data&&e.data.type==='oc-limit-ack'){"
-                "try{google.colab.kernel.invokeFunction('oc.limitAck',[],{});}catch(err){}}});}"
-                "try{window.top.postMessage(" + payload + ",'https://colab.research.google.com');}catch(e){}"
-                "return 'posted';})()")
-            if not ev.wait(12):
-                say('⚠️ No acknowledgement from the auto-switch script. This runtime stays up. '
-                    'Install the Tampermonkey script, or use Runtime → Restart session.')
-                return
-            say('✅ Tampermonkey acknowledged. Unassigning this runtime.')
-            time.sleep(1.0)
-            from google.colab import runtime
-            runtime.unassign()
-        except Exception:
-            pass
-
-    t = threading.Thread(target=worker, daemon=True)
-    _LIMIT_ACK['thread'] = t
-    t.start()
+def _post_limit_and_wait_ack(source, test):
+    payload = json.dumps({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source, 'test': bool(test)})
+    js = (
+        "new Promise(function(resolve){"
+        "var timer=setTimeout(function(){resolve('timeout');},12000);"
+        "function onAck(e){if(e.data&&e.data.type==='oc-limit-ack'){clearTimeout(timer);"
+        "window.removeEventListener('message',onAck);resolve('acked');}}"
+        "window.addEventListener('message',onAck);"
+        "try{window.top.postMessage(" + payload + ",'https://colab.research.google.com');}"
+        "catch(err){clearTimeout(timer);resolve('post-failed');}"
+        "})"
+    )
+    value, err, timed_out = _colab_js(js, timeout=20)
+    return value == 'acked' and not err and not timed_out
 
 
 def clear_limit_hit(source):
@@ -747,43 +726,54 @@ def do_limit_test(_):
 limit_test_btn.on_click(do_limit_test)
 
 
-def _watch_proxy_log():
-    """Tail /tmp/proxy.log: '✗ … -> upstream 429' = limit, '✓ …' = recovered.
+def _pause_for_events(seconds=1):
+    """Wait without dropping widget and Tampermonkey messages.
 
-    The proxy (started by this panel) writes that log; external apps using
-    the public address show up there even though they never click a button.
+    time.sleep would freeze this cell's output channel. eval_js keeps the
+    kernel polling while the browser timer runs.
+    """
+    ms = int(seconds * 1000)
+    value, err, timed_out = _colab_js(
+        "new Promise(function(r){setTimeout(function(){r('tick');}," + str(ms) + ")})",
+        timeout=seconds + 8)
+    if err or timed_out or value != 'tick':
+        time.sleep(seconds)
+
+
+def follow_proxy_log():
+    """Stay on this cell's thread and tail /tmp/proxy.log.
+
+    A FreeUsageLimitError is logged as '✗ … -> upstream 429'. Seeing that
+    updates the banner and posts oc-limit-hit to Tampermonkey. This cell
+    must keep running; once it finishes, Colab closes the output and the
+    page no longer receives the signal.
     """
     path = '/tmp/proxy.log'
-    try:  # start at the end - don't replay a previous run's 429s
+    try:
         offset = os.path.getsize(path)
     except Exception:
         offset = 0
+    say('🔔 Watching the proxy log in this cell. Leave it running ([*]). '
+        'A free-limit response will update this panel and signal Tampermonkey.')
     while True:
         try:
             if os.path.exists(path):
-                if os.path.getsize(path) < offset:  # proxy restarted, log truncated
+                if os.path.getsize(path) < offset:
                     offset = 0
                 with open(path, errors='replace') as fh:
                     fh.seek(offset)
                     lines = fh.readlines()
                     offset = fh.tell()
                 for line in lines:
-                    # Only a final upstream 429 counts - the minimal->full
-                    # retry line ('↺ … 429') may still succeed.
                     if 'upstream 429' in line or 'freeusagelimit' in line.lower():
-                        notify_limit_hit('proxy log', line.strip())
+                        if 'dummy /test' in line:
+                            STATE['limit_hit'] = False
+                        notify_limit_hit('proxy log', line.strip(), test='dummy /test' in line)
                     elif line.startswith('✓'):
                         clear_limit_hit('proxy log')
         except Exception:
             pass
-        time.sleep(2)
-
-
-def start_limit_watcher():
-    if STATE.get('limit_watcher'):
-        return
-    STATE['limit_watcher'] = True
-    threading.Thread(target=_watch_proxy_log, daemon=True).start()
+        _pause_for_events(1)
 
 
 def _paint_opencode_button(on):
@@ -869,13 +859,9 @@ panel = widgets.VBox([
 display(panel)
 say('👋 Session connected. Starting setup, tests, and your public address — no buttons to press.')
 restore_opencode_mode()
-start_limit_watcher()
-say('🔔 Limit watcher on: if the OpenCode free limit is hit, a red banner appears '
-    'at the top of this panel and the Tampermonkey auto-switch is signalled.')
-
-
-# Tell the page (Tampermonkey auto-switch) this panel cell is running on
-# this kernel - that is how it verifies a reconnect + Run all worked,
-# without scraping the notebook DOM.
+# Tell the page this panel cell is running on this kernel.
 _post_to_page({'type': 'oc-panel-started', 'ts': int(time.time() * 1000)})
 do_all()
+# Does not return. The cell stays on [*] so the banner and the
+# Tampermonkey postMessage keep working.
+follow_proxy_log()
