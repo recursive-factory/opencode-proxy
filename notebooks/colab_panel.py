@@ -25,7 +25,7 @@ FILES = ['src/fingerprint.ts', 'src/hit-model.ts', 'src/proxy.ts',
 MODELS = ['big-pickle', 'beam-free', 'deepseek-v4.1-flash-free', 'flint-40b-free',
           'glm-5.3-flash-free', 'mimo-v2.6-flash-free', 'nemotron-3.5-lightning-free',
           'nemotron-3.5-super-vl-free']
-STATE = {'proxy': None, 'tunnel': None, 'url': None, 'dump': False, 'opencode': False,
+STATE = {'proxy': None, 'tunnel': None, 'url': None, 'dump': False, 'opencode': True,
          'limit_hit': False, 'limit_watcher': False, 'last_bun_output': ''}
 DUMP_FILE = ROOT + '/.proxy-dump.jsonl'
 QUOTA_HINT = ('If you see "429" or "quota", this session\'s free allowance is used up. '
@@ -526,10 +526,10 @@ download_btn.on_click(do_download_dump)
 dump_off_btn.on_click(do_dump_off)
 
 opencode_btn = widgets.ToggleButton(
-    value=False,
-    description='OpenCode mode: OFF',
-    button_style='',
-    tooltip='Forward each request body to the API unchanged. Turn on when the client is OpenCode.',
+    value=True,
+    description='OpenCode mode: ON',
+    button_style='success',
+    tooltip='Forward each request body to the API unchanged. On by default - turn off for Cursor, VS Code, pi.dev, or the Ask box.',
     layout=widgets.Layout(width='220px'),
 )
 
@@ -574,9 +574,9 @@ def do_opencode_mode(change):
 
 opencode_btn.observe(do_opencode_mode, names='value')
 
-# The Colab VM disk is wiped on disconnect. The choice lives in this browser
-# (localStorage) so the startup cell can turn OpenCode mode back on before
-# the proxy launches. A different browser, or cleared site data, starts off.
+# OpenCode mode defaults to ON in code (STATE + toggle above), so a new
+# session - same browser, different browser, or cleared site data - starts
+# in OpenCode mode. localStorage only records an explicit opt-out ('off').
 _MODE_JS_KEY = 'opencode-proxy-mode'
 _RESTORING = {'on': False}
 
@@ -617,8 +617,11 @@ def _colab_js(script, timeout=8):
 
 def _remember_opencode_mode(on):
     flag = 'on' if on else 'off'
+    # Must be a single JS expression: a ';' inside _colab_js's v:(...) wrap
+    # is a SyntaxError in the browser, so the save silently never happened.
     value, err, timed_out = _colab_js(
-        "localStorage.setItem('" + _MODE_JS_KEY + "', '" + flag + "'); '" + flag + "'")
+        "(()=>{localStorage.setItem('" + _MODE_JS_KEY + "', '" + flag +
+        "'); return localStorage.getItem('" + _MODE_JS_KEY + "');})()")
     return value == flag and not err and not timed_out
 
 
@@ -725,16 +728,24 @@ def _paint_opencode_button(on):
 
 
 def restore_opencode_mode():
-    """Apply the browser's saved OpenCode mode before autorun starts the proxy."""
+    """OpenCode mode is ON by default in code, so it survives any new session.
+
+    localStorage only opts out: an explicit saved 'off' (the user turned it
+    off for Cursor/VS Code/Ask) is honoured; 'on', nothing saved, a different
+    browser, cleared storage, or an unreadable store all start ON.
+    """
     saved, err, timed_out = _colab_js("localStorage.getItem('" + _MODE_JS_KEY + "')")
-    if timed_out or err:
-        say('⚠️ Could not read the saved OpenCode mode from this browser, so this session starts with it off.')
-        return
-    if saved == 'on':
-        _paint_opencode_button(True)
-        say('✅ OpenCode mode restored from this browser. Startup will forward request bodies unchanged.')
-    elif saved == 'off':
+    if saved == 'off' and not err and not timed_out:
         _paint_opencode_button(False)
+        say('✅ OpenCode mode off, as saved in this browser. Turn it on in Step 3 for OpenCode.')
+        return
+    _paint_opencode_button(True)
+    if saved == 'on':
+        say('✅ OpenCode mode on (saved in this browser). Startup forwards request bodies unchanged.')
+    elif timed_out or err:
+        say('✅ OpenCode mode on (default — the saved choice could not be read).')
+    else:
+        say('✅ OpenCode mode on (default). Turn it off in Step 3 for Cursor, VS Code, pi.dev, or the Ask box.')
 
 zrok_fields = widgets.VBox([name_label, token_pw])
 
@@ -764,10 +775,10 @@ panel = widgets.VBox([
         status,
         result_out,
         opencode_btn,
-        widgets.Label('OpenCode mode: turn this ON only when OpenCode itself is the client. '
-                      'The body you send is the body posted to the API. Leave it OFF for '
-                      'Cursor, VS Code, pi.dev, and the Ask box below. '
-                      'This choice is remembered in this browser, so a new session starts in the same mode.')]),
+        widgets.Label('OpenCode mode is ON by default in every new session: the body you send '
+                      'is the body posted to the API. Turn it OFF only for Cursor, VS Code, '
+                      'pi.dev, or the Ask box below — an explicit OFF is remembered in this '
+                      'browser; anything else (new browser, cleared storage) starts ON again.')]),
     section('💬 Try the models', [
         widgets.HBox([model_dd, prompt_text, ask_btn]),
         widgets.Label('A quick chat, right here in the notebook. Works once the proxy is running.')]),
