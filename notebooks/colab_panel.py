@@ -637,7 +637,7 @@ def _looks_like_limit(text):
     return '429' in t or 'freeusagelimit' in t or 'quota' in t or 'rate limit' in t
 
 
-def notify_limit_hit(source, detail=''):
+def notify_limit_hit(source, detail='', test=False):
     """Show the limit alert in Colab - once per episode, until a request works.
 
     Fires from the log watcher (requests from Cursor etc. never touch the
@@ -661,7 +661,7 @@ def notify_limit_hit(source, detail=''):
     # invisible to the page - but postMessage to window.top crosses that
     # boundary by design. The Tampermonkey auto-switch listens for this.
     try:
-        payload = json.dumps({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source})
+        payload = json.dumps({'type': 'oc-limit-hit', 'ts': int(time.time() * 1000), 'source': source, 'test': bool(test)})
         _colab_js("(()=>{try{window.top.postMessage(" + payload +
                   ", 'https://colab.research.google.com');}catch(e){} return 'posted';})()")
     except Exception:
@@ -687,7 +687,7 @@ def do_limit_test(_):
     # postMessage the Tampermonkey auto-switch listens for). Reset the
     # once-per-episode flag first so the test can be re-run any time.
     STATE['limit_hit'] = False
-    notify_limit_hit('panel test button')
+    notify_limit_hit('panel test button', test=True)
     say('🧪 Test alert fired. If the Tampermonkey auto-switch is installed, '
         'this session will now be deleted and reconnected automatically.')
 

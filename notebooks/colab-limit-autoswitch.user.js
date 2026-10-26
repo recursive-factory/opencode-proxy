@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode Colab - Limit Auto-Switch
 // @namespace    opencode-proxy
-// @version      1.1.0
+// @version      1.2.0
 // @description  When the OpenCode free limit is hit in Colab: delete the runtime assignment via API, reload the page, click Connect (through its shadow DOM), verify a fresh assignment is live, then make sure the panel cell runs (Run all if startup did not). The proxy then boots in OpenCode mode on the fresh session.
 // @match        https://colab.research.google.com/*
 // @run-at       document-idle
@@ -42,7 +42,7 @@
   badge.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:99999;background:#202124;color:#e8eaed;' +
     'font:12px/1.4 system-ui;padding:6px 10px;border-radius:8px;opacity:.85;cursor:pointer;max-width:320px';
   const sayBadge = (t) => { badge.textContent = t; console.log('[auto-switch]', t); };
-  badge.addEventListener('click', () => { if (confirm('Switch Colab session now? This deletes the current runtime.')) switchNow('badge click'); });
+  badge.addEventListener('click', () => { if (confirm('Switch Colab session now? This deletes the current runtime.')) switchNow('badge click', true); });
   (document.body || document.documentElement).appendChild(badge);
 
   // ------------------------------------------------------------- DOM utils
@@ -193,9 +193,14 @@
   }
 
   let switching = false;
-  async function switchNow(reason) {
+  // The MAX_PER_HOUR guard only applies to AUTOMATIC switches: its job is
+  // to stop a loop where every fresh session instantly hits the limit
+  // again. Manual switches (badge click, __ocAutoSwitch.now(), the
+  // panel's Test limit alert button) are a human's explicit choice, so
+  // they neither check nor consume the guard's budget.
+  async function switchNow(reason, manual = false) {
     if (switching) return;
-    if (recentSwitches().length >= MAX_PER_HOUR) { sayBadge('⚠️ already switched ' + MAX_PER_HOUR + 'x this hour - paused (' + reason + ')'); return; }
+    if (!manual && recentSwitches().length >= MAX_PER_HOUR) { sayBadge('⚠️ already switched ' + MAX_PER_HOUR + 'x this hour - paused (' + reason + '). Manual: __ocAutoSwitch.reset() clears this'); return; }
     switching = true;
     try {
       sayBadge('🚨 limit hit - finding current assignment… (' + reason + ')');
@@ -203,9 +208,10 @@
       if (!id) { sayBadge('⚠️ could not identify the current assignment - not deleting anything'); return; }
       sayBadge('🗑️ deleting ' + id + ' then reloading…');
       await rpc('DeleteAssignment', [id]);
-      // Only a successful delete counts against the loop guard.
-      const times = recentSwitches(); times.push(Date.now());
-      localStorage.setItem(TIMES, JSON.stringify(times));
+      if (!manual) { // only successful automatic deletes count
+        const times = recentSwitches(); times.push(Date.now());
+        localStorage.setItem(TIMES, JSON.stringify(times));
+      }
       sessionStorage.setItem(FLAG, JSON.stringify({ ts: Date.now(), deletedId: id }));
       await sleep(600);
       location.reload(); // phase 2 in main() runs after load (userscript survives)
@@ -268,7 +274,7 @@
     if (d.type === 'oc-limit-hit') {
       if (!AUTO_ON_LIMIT) { sayBadge('🔕 limit signal received but AUTO_ON_LIMIT is off'); return; }
       if (d.ts && Date.now() - d.ts > 120000) { sayBadge('⚠️ ignored stale limit signal'); return; }
-      switchNow('postMessage from panel (' + (d.source || '?') + ')');
+      switchNow('postMessage from panel (' + (d.source || '?') + ')', d.test === true);
     }
   });
 
@@ -290,7 +296,8 @@
   }
 
   window.__ocAutoSwitch = {
-    now: () => switchNow('manual'),
+    now: () => switchNow('manual', true),
+    reset: () => { localStorage.removeItem(TIMES); sayBadge('🔔 loop-guard cleared - auto-switch watching again'); },
     stop: () => { sayBadge('⏹️ auto-switch stopped for this page'); window.__ocAutoSwitch = null; },
   };
   main();
